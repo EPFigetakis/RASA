@@ -1,28 +1,22 @@
-    # Byte-code files
-    *.pyc
-    __pycache__/
-
-    # Virtual environment
-    venv/
-    .venv/
-    env/
-    .env/
-
-    # Editor/IDE specific files (e.g., VS Code, PyCharm)
-    .vscode/
-    .idea/
-
-    # Test/coverage related files
-    .pytest_cache/
-    .coverage
-    htmlcov/
-
-    # Database files (e.g., SQLite)
-    *.sqlite3
-
-    # Log files
-    *.log
-
-    # Operating system generated files
-    .DS_Store
-    Thumbs.db
+# Byte-code files
+*.pyc
+__pycache__/
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+# Editor/IDE specific files (e.g., VS Code, PyCharm)
+.vscode/
+.idea/
+# Test/coverage related files
+.pytest_cache/
+.coverage
+htmlcov/
+# Database files (e.g., SQLite)
+*.sqlite3
+# Log files
+*.log
+# Operating system generated files
+.DS_Store
+Thumbs.db
