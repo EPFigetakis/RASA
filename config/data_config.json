@@ -1,0 +1,19 @@
+{
+  "data_source": "yahoo",
+  "tickers":     ["UNP","CSX","CNI","CP","NSC","RAIL","UPS","FDX","XPO","JBHT","ODFL","ALK","DAL","SKYW","AAL","UAL","UBER","LYFT","LUV",
+  "LMT","RTX","BA","NOC","LHX","GE","HII","TDG","AVAV","KTOS","AXON","GD","HWM","BWXT",
+  "ABB","ETN","GEV","HUBB","NVT","POWL","SBGSF","SIEGY","VRT",
+  "AEP","CEG","DUK","NEE","SO","VST","EXC","ED","SRE","D","XEL","JCI","PWR",
+  "CAT","EMR","HON","DE","WM","CTAS","IR","DOV","ETN","AME","ROK","BAESY","RYCEY","PH","MMM","ITW","CMI","CARR","FERG","GWW",
+  "V","MA","AXP","COF","PYPL","SYF","SOFI","UPST","WU","EZPW","QFIN",
+  "BRK-B","JPM","BAC","WFC","MS","GS","HSBC","BX","BLK","SCHW","TD","PGR","HOOD","UBS","CB","KKR","BAM","MCO","APO","BK","USB","AFL",
+  "KO","PEP","GIS","MDLZ","NSRGY","KDP","PG","CLX","UL","KMB","CL","EL","WMT","COST","KR","TGT","PM","MO","DEO",
+  "ABBV","PFE","JNJ","LLY","AMGN","GILD","NVS","AZN","VRTX","REGN","ALNY","INSM","RPRX","IONS","MDGL","MRNA","CRSP",
+  "KLAC","ASML","AMAT","LRCX","FIS","CTSH","TEAM","ARM","APP","SHOP","SPOT","TSM","ADI","ANET","TER","ENTG","NVMI",
+  "NOW","CRM","CRWD","PANW","QCOM","WDC","TTD","INTU","ONTO","INTC","TSLA","GOOGL","GOOG","AVGO","CSCO","AMZN","MSFT",
+  "AMD","IBM","AAPL","PLTR","NVDA","META","MU"],
+
+  "start_date": "2015-01-01",
+  "end_date": null,
+  "interval": "1d"
+}
