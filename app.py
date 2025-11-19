@@ -261,6 +261,8 @@ def main() -> None:
     st.set_page_config(
         page_title="RASA Quant Prototype",
         layout="wide",
+        page_icon = "📈"
+        
     )
     init_session_state()
 
