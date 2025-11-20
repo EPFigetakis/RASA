@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import json
 
 import pandas as pd
 import streamlit as st
@@ -27,9 +28,105 @@ import streamlit as st
 from core import panel, pair_selection, pairs as pairs_mod, strategy
 
 
+APP_META_PATH = Path("config/app_meta.json")
+
 # -----------------------------------------------------------------------------
 # Small helpers
 # -----------------------------------------------------------------------------
+
+@st.cache_data
+def load_app_meta() -> dict:
+    """
+    Load app version and change notes from config/app_meta.json.
+
+    Returns a dict with keys:
+        - "version": str
+        - "change_notes": list[str]
+    Falls back to sensible defaults if the file is missing or invalid.
+    """
+    default = {
+        "version": "0.0.0-dev",
+        "change_notes": ["No change notes available. Edit config/app_meta.json to add some."],
+    }
+
+    if not APP_META_PATH.exists():
+        return default
+
+    try:
+        with APP_META_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return default
+
+    version = str(data.get("version", default["version"]))
+    notes = data.get("change_notes", default["change_notes"])
+    if not isinstance(notes, list):
+        notes = default["change_notes"]
+
+    return {"version": version, "change_notes": notes}
+
+def show_version_widget(app_meta: dict) -> None:
+    """Small card showing app version and recent change notes."""
+    version = app_meta.get("version", "unknown")
+    notes = app_meta.get("change_notes", [])
+
+    items_html = "".join(f"<li>{note}</li>" for note in notes)
+
+    st.markdown(
+        f"""
+        <div class="rasa-version-card">
+          <h3>🚀 App Version <span class="rasa-version-pill">{version}</span></h3>
+          <p><strong>Change notes</strong></p>
+          <ul>
+            {items_html}
+          </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def inject_global_styles() -> None:
+    """Inject a bit of CSS to style the version widget like a card."""
+    st.markdown(
+        """
+        <style>
+        .rasa-version-card {
+            padding: 1rem 1.25rem;
+            border-radius: 0.9rem;
+            border: 1px solid rgba(148, 163, 184, 0.6); /* slate-400-ish */
+            background: linear-gradient(
+                135deg,
+                rgba(59, 130, 246, 0.06),
+                rgba(236, 72, 153, 0.04)
+            );
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.25); /* deep but soft */
+            margin-bottom: 1.5rem;
+        }
+        .rasa-version-card h3 {
+            margin: 0 0 0.4rem 0;
+            font-weight: 700;
+        }
+        .rasa-version-pill {
+            display: inline-block;
+            padding: 0.1rem 0.6rem;
+            margin-left: 0.35rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            background: rgba(15, 23, 42, 0.9);
+            color: #f9fafb;
+        }
+        .rasa-version-card p {
+            margin: 0.35rem 0;
+        }
+        .rasa-version-card ul {
+            margin: 0.25rem 0 0 1.1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def init_session_state() -> None:
     """Initialize keys in st.session_state we want to reuse."""
@@ -103,29 +200,50 @@ def run_pair_selection_ui() -> None:
     use_log_prices = st.checkbox("Use log prices for hedge estimation", value=False)
     add_intercept = st.checkbox("Include intercept in hedge regression", value=False)
 
-    if st.button("Run pair selection", type="primary"):
-        cfg = pair_selection.PairSelectionConfig(
-            max_pvalue=max_pvalue,
-            min_obs=int(min_obs),
-            use_log_prices=use_log_prices,
-            add_intercept=add_intercept,
-            max_pairs=int(max_pairs),
-            save_to_csv=True,   # keep default: write to cache/pairs/pair_candidates.csv
-        )
-        with st.spinner("Scanning for candidate pairs..."):
+    # Build config once; its cache_subdir + filename define where we load/save
+    cfg = pair_selection.PairSelectionConfig(
+        max_pvalue=max_pvalue,
+        min_obs=int(min_obs),
+        use_log_prices=use_log_prices,
+        add_intercept=add_intercept,
+        max_pairs=int(max_pairs),
+        save_to_csv=True,  # ensure we write to CSV when computing
+    )
+
+    load_col, compute_col = st.columns(2)
+
+    # -------- Load cached selection --------
+    with load_col:
+        if st.button("Load saved pair selection"):
             try:
-                pairs_df = pair_selection.find_candidate_pairs(px, cfg)
+                pairs_df = pair_selection.load_candidate_pairs(cfg)
+            except FileNotFoundError:
+                st.warning(
+                    "No saved pair selection found yet.\n"
+                    "Run a pair selection once to create the cache."
+                )
             except Exception as e:
-                st.error(f"Pair selection failed: {e}")
-                return
+                st.error(f"Failed to load pair selection: {e}")
+            else:
+                st.session_state["pairs_df"] = pairs_df
+                st.success(f"Loaded {len(pairs_df)} candidate pairs from cache.")
 
-        if pairs_df.empty:
-            st.warning("No candidate pairs found with the given criteria.")
-        else:
-            st.session_state["pairs_df"] = pairs_df
-            st.success(f"Found {len(pairs_df)} candidate pairs.")
+    # -------- Compute new selection --------
+    with compute_col:
+        if st.button("Compute new pair selection", type="primary"):
+            with st.spinner("Scanning for candidate pairs..."):
+                try:
+                    pairs_df = pair_selection.find_candidate_pairs(px, cfg)
+                except Exception as e:
+                    st.error(f"Pair selection failed: {e}")
+                else:
+                    if pairs_df.empty:
+                        st.warning("No candidate pairs found with the given criteria.")
+                    else:
+                        st.session_state["pairs_df"] = pairs_df
+                        st.success(f"Found {len(pairs_df)} candidate pairs.")
 
-    # Display existing results if present
+    # -------- Show whatever is currently loaded in session_state --------
     pairs_df = st.session_state.get("pairs_df")
     if isinstance(pairs_df, pd.DataFrame) and not pairs_df.empty:
         st.write("### Candidate pairs")
@@ -264,7 +382,10 @@ def main() -> None:
         page_icon = "📈"
         
     )
+    inject_global_styles()
     init_session_state()
+
+    app_meta = load_app_meta()
 
     st.sidebar.title("RASA Controls")
 
@@ -285,6 +406,9 @@ def main() -> None:
 
     # -------------------- Overview --------------------
     if view == "Overview":
+
+        show_version_widget(app_meta)
+
         st.write("## Data overview")
 
         px: Optional[pd.DataFrame] = st.session_state.get("px")

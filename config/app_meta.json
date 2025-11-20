@@ -1,0 +1,7 @@
+{
+  "version": "0.1.1 (11/19/2025)",
+  "change_notes": [
+    "Initial Streamlit prototype: load data, run pair selection, and inspect a single pair with backtest.",
+    "Implement pair canidates save file for loading."
+  ]
+}

@@ -44,6 +44,8 @@ from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 import pandas as pd
 
+from pathlib import Path
+
 # External dependency for Engle-Granger cointegration test
 try:
     from statsmodels.tsa.stattools import coint
@@ -152,6 +154,47 @@ class PairStat:
 # ---------------------------------------------------------------------------
 # Core calculations
 # ---------------------------------------------------------------------------
+
+def get_pairs_cache_path(cfg: Optional[PairSelectionConfig] = None) -> Path:
+    """
+    Compute the path where candidate pairs are cached as CSV.
+
+    If cfg is None, a default PairSelectionConfig is used. Note that only
+    `cache_subdir` and `filename` from the config affect the path.
+    """
+    if cfg is None:
+        cfg = PairSelectionConfig()
+    return paths.cache_dir() / cfg.cache_subdir / cfg.filename
+
+
+def load_candidate_pairs(cfg: Optional[PairSelectionConfig] = None) -> pd.DataFrame:
+    """
+    Load previously saved pair selection results from CSV.
+
+    Parameters
+    ----------
+    cfg : PairSelectionConfig or None
+        Determines the cache_subdir and filename. If None, defaults are used.
+
+    Returns
+    -------
+    pd.DataFrame
+        Candidate pairs table as saved by `find_candidate_pairs`.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the cache file does not exist.
+    """
+    cache_path = get_pairs_cache_path(cfg)
+    if not cache_path.exists():
+        raise FileNotFoundError(
+            f"No cached pair candidates found at: {cache_path}\n"
+            "Run pair selection with save_to_csv=True at least once."
+        )
+    df = pd.read_csv(cache_path)
+    return df
+
 
 def _estimate_half_life(spread: pd.Series) -> float:
     """
