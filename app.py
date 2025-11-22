@@ -38,12 +38,38 @@ APP_META_PATH = Path("config/app_meta.json")
 # Small helpers
 # -----------------------------------------------------------------------------
 
-DB_PATH = os.environ.get("STREAMLIT_AUTH_DB_PATH", "auth.db")
+# ---- DB path config (matches /home/manoli/RASA/core/auth.db) ----
+BASE_DIR = Path(__file__).resolve().parent      # /home/manoli/RASA
+DEFAULT_DB_PATH = BASE_DIR / "core" / "auth.db" # /home/manoli/RASA/core/auth.db
+
+# Allow override via env var if you ever want it, otherwise use auth.db in core/
+DB_PATH = os.environ.get("STREAMLIT_AUTH_DB_PATH", str(DEFAULT_DB_PATH))
+
+
+def init_db_schema():
+    """Ensure the users table exists in the auth DB."""
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
 
 def get_db_connection():
-    # `check_same_thread=False` so Streamlit threads can share the connection safely
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     return conn
+
 
 def verify_user(username: str, password: str) -> bool:
     conn = get_db_connection()
@@ -57,6 +83,11 @@ def verify_user(username: str, password: str) -> bool:
 
     stored_hash = row[0].encode("utf-8")
     return bcrypt.checkpw(password.encode("utf-8"), stored_hash)
+
+
+# Make sure table exists before any login logic runs
+init_db_schema()
+
 
 def login_form():
     st.title("🔐 Login")
