@@ -23,6 +23,10 @@ import json
 
 import pandas as pd
 import streamlit as st
+import os 
+import sqlite3
+import bcrypt
+
 
 # Import your core modules
 from core import panel, pair_selection, pairs as pairs_mod, strategy
@@ -33,6 +37,63 @@ APP_META_PATH = Path("config/app_meta.json")
 # -----------------------------------------------------------------------------
 # Small helpers
 # -----------------------------------------------------------------------------
+
+DB_PATH = os.environ.get("STREAMLIT_AUTH_DB_PATH", "auth.db")
+
+def get_db_connection():
+    # `check_same_thread=False` so Streamlit threads can share the connection safely
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return conn
+
+def verify_user(username: str, password: str) -> bool:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return False
+
+    stored_hash = row[0].encode("utf-8")
+    return bcrypt.checkpw(password.encode("utf-8"), stored_hash)
+
+def login_form():
+    st.title("🔐 Login")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    login_btn = st.button("Log in")
+
+    if login_btn:
+        if not username or not password:
+            st.error("Please enter both username and password.")
+            return False
+        if verify_user(username, password):
+            st.session_state["user"] = username
+            st.success(f"Welcome, {username}!")
+            st.experimental_rerun()  # refresh to show the app
+        else:
+            st.error("Invalid username or password.")
+            return False
+
+    return False
+
+def require_login():
+    if "user" not in st.session_state:
+        login_form()
+        st.stop()  # Don't run the rest of the app until logged in
+
+# 🚧 Gate the app here
+require_login()
+
+# ✅ If we reach here, the user is authenticated
+st.sidebar.write(f"Logged in as **{st.session_state['user']}**")
+if st.sidebar.button("Logout"):
+    st.session_state.clear()
+    st.experimental_rerun()
+
 
 @st.cache_data
 def load_app_meta() -> dict:
