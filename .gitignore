@@ -20,3 +20,6 @@ htmlcov/
 # Operating system generated files
 .DS_Store
 Thumbs.db
+auth.db
+*.db
+
