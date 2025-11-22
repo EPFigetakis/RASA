@@ -104,7 +104,7 @@ def login_form():
         if verify_user(username, password):
             st.session_state["user"] = username
             st.success(f"Welcome, {username}!")
-            st.experimental_rerun()  # refresh to show the app
+            st.rerun()  # refresh to show the app
         else:
             st.error("Invalid username or password.")
             return False
