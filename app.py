@@ -96,6 +96,7 @@ def login_form():
         page_icon = "📈"
         
     )
+    st.title("🔐 Login")
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
