@@ -90,7 +90,12 @@ init_db_schema()
 
 
 def login_form():
-    st.title("🔐 Login")
+    st.set_page_config(
+        page_title="RASA Quant Prototype",
+        layout="wide",
+        page_icon = "📈"
+        
+    )
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
@@ -123,7 +128,7 @@ require_login()
 st.sidebar.write(f"Logged in as **{st.session_state['user']}**")
 if st.sidebar.button("Logout"):
     st.session_state.clear()
-    st.experimental_rerun()
+    st.rerun()
 
 
 @st.cache_data
