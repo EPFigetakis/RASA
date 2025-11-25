@@ -26,6 +26,8 @@ import streamlit as st
 import os 
 import sqlite3
 import bcrypt
+from typing import Optional
+import math
 
 
 # Import your core modules
@@ -469,6 +471,241 @@ def run_single_pair_view() -> None:
         st.dataframe(eq_df.tail(), use_container_width=True)
 
 
+def run_trade_proposals_ui() -> None:
+    """
+    Propose hypothetical trades based on the latest signals for top candidate pairs.
+
+    IMPORTANT: This is an educational / research tool only and does NOT constitute
+    financial advice or a recommendation to trade.
+    """
+    px: Optional[pd.DataFrame] = st.session_state.get("px")
+    pairs_df: Optional[pd.DataFrame] = st.session_state.get("pairs_df")
+
+    st.write("## Trade proposals (experimental)")
+    st.info(
+        "These trade ideas are generated from the current pair signals and are meant "
+        "for research/learning purposes only. They are **not** financial advice."
+    )
+
+    if px is None:
+        st.warning("Load data first (left sidebar) before generating trade proposals.")
+        return
+
+    if pairs_df is None or pairs_df.empty:
+        st.warning("Run pair selection first so we have candidate pairs to scan.")
+        return
+
+    # ---------------- Controls ----------------
+    st.write("### Proposal configuration")
+
+    max_pairs_available = len(pairs_df)
+    col1, col2 = st.columns(2)
+    with col1:
+        top_n = st.slider(
+            "Top N candidate pairs to scan",
+            min_value=1,
+            max_value=max_pairs_available,
+            value=min(10, max_pairs_available),
+            step=1,
+        )
+    with col2:
+        notional_per_pair = st.number_input(
+            "Approximate notional per pair (e.g., USD)",
+            min_value=0.0,
+            value=10_000.0,
+            step=1_000.0,
+        )
+
+    col3, col4, col5 = st.columns(3)
+    with col3:
+        entry_z = st.number_input(
+            "Entry Z threshold",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.0,
+            step=0.1,
+        )
+    with col4:
+        exit_z = st.number_input(
+            "Exit Z threshold",
+            min_value=0.1,
+            max_value=3.0,
+            value=0.5,
+            step=0.1,
+        )
+    with col5:
+        zscore_window = st.number_input(
+            "Z-score window (days)",
+            min_value=20,
+            max_value=252,
+            value=60,
+            step=5,
+        )
+
+    use_log_prices = st.checkbox("Use log prices for hedge estimation", value=False)
+    add_intercept = st.checkbox("Include intercept in hedge regression", value=False)
+
+    generate = st.button("Generate trade proposals", type="primary")
+
+    if not generate:
+        return
+
+    # ---------------- Signal configuration ----------------
+    hedge_cfg = pairs_mod.HedgeConfig(
+        use_log_prices=use_log_prices,
+        add_intercept=add_intercept,
+    )
+    signal_cfg = pairs_mod.SignalConfig(
+        entry_z=float(entry_z),
+        exit_z=float(exit_z),
+        max_position=1,
+    )
+
+    # ---------------- Build proposals ----------------
+    proposals = []
+
+    subset = pairs_df.iloc[:top_n].copy()
+
+    for i, row in subset.iterrows():
+        x = str(row["x"])
+        y = str(row["y"])
+        spec = pairs_mod.PairSpec(x=x, y=y)
+
+        try:
+            pair_res = pairs_mod.build_pair_signals_from_panel(
+                px=px,
+                spec=spec,
+                hedge_cfg=hedge_cfg,
+                signal_cfg=signal_cfg,
+                zscore_window=int(zscore_window),
+            )
+        except Exception as e:
+            st.warning(f"Failed to build signals for pair {x}/{y}: {e}")
+            continue
+
+        # Latest signal / z-score / spread
+        sig = pair_res.signals.dropna()
+        if sig.empty:
+            continue
+
+        last_pos = float(sig.iloc[-1])
+        last_time = sig.index[-1]
+
+        # Skip flat positions (no trade)
+        if last_pos == 0.0:
+            continue
+
+        z_series = pair_res.zscore.dropna()
+        if last_time in z_series.index:
+            z_last = float(z_series.loc[last_time])
+        elif not z_series.empty:
+            z_last = float(z_series.iloc[-1])
+        else:
+            z_last = float("nan")
+
+        spread_series = pair_res.spread.dropna()
+        if last_time in spread_series.index:
+            spread_last = float(spread_series.loc[last_time])
+        elif not spread_series.empty:
+            spread_last = float(spread_series.iloc[-1])
+        else:
+            spread_last = float("nan")
+
+        # Last prices
+        # If the exact timestamp isn't in px (due to alignment), fall back to last non-NaN.
+        try:
+            price_y = float(px[y].dropna().loc[:last_time].iloc[-1])
+            price_x = float(px[x].dropna().loc[:last_time].iloc[-1])
+        except Exception:
+            # Worst case: just take last available prices
+            price_y = float(px[y].dropna().iloc[-1])
+            price_x = float(px[x].dropna().iloc[-1])
+
+        beta = float(pair_res.hedge_ratio)
+
+        # Approximate notionally 1 "spread unit" cost:
+        approx_unit_cost = abs(price_y) + abs(beta) * abs(price_x)
+        if approx_unit_cost <= 0:
+            units = 0.0
+        else:
+            units = notional_per_pair / approx_unit_cost
+
+        # Position sign: +1 = long spread (long Y, short X); -1 = short spread
+        # units is positive notionally; we attach the sign afterwards
+        signed_units = units * last_pos
+
+        qty_y = signed_units           # + => buy Y, - => sell Y
+        qty_x = -beta * signed_units   # hedge leg
+
+        if last_pos > 0:
+            action = "LONG spread (buy Y, sell X)"
+        elif last_pos < 0:
+            action = "SHORT spread (sell Y, buy X)"
+        else:
+            action = "FLAT"
+
+        proposals.append(
+            {
+                "pair": f"{x}/{y}",
+                "x": x,
+                "y": y,
+                "as_of": last_time,
+                "action": action,
+                "position": last_pos,
+                "units_est": units,
+                "qty_y_est": qty_y,
+                "qty_x_est": qty_x,
+                "price_y": price_y,
+                "price_x": price_x,
+                "beta": beta,
+                "zscore": z_last,
+                "spread": spread_last,
+                "notional_target": notional_per_pair,
+                "pvalue": float(row.get("pvalue", float("nan"))),
+                "half_life": float(row.get("half_life", float("nan"))),
+            }
+        )
+
+    if not proposals:
+        st.info(
+            "No actionable trades found among the top "
+            f"{top_n} pairs with the current thresholds."
+        )
+        return
+
+    proposals_df = pd.DataFrame(proposals)
+
+    # Sort by |zscore| (most extreme first)
+    if "zscore" in proposals_df.columns:
+        proposals_df = proposals_df.reindex(
+            proposals_df["zscore"].abs().sort_values(ascending=False).index
+        )
+
+    st.write(f"### Proposed trades ({len(proposals_df)} found)")
+
+    display_cols = [
+        "pair",
+        "as_of",
+        "action",
+        "zscore",
+        "price_x",
+        "price_y",
+        "beta",
+        "qty_y_est",
+        "qty_x_est",
+        "notional_target",
+        "pvalue",
+        "half_life",
+    ]
+    display_cols = [c for c in display_cols if c in proposals_df.columns]
+
+    st.dataframe(proposals_df[display_cols], use_container_width=True)
+
+    with st.expander("Show full proposal table"):
+        st.dataframe(proposals_df, use_container_width=True)
+
+
+
 # -----------------------------------------------------------------------------
 # Main Streamlit app
 # -----------------------------------------------------------------------------
@@ -496,7 +733,7 @@ def main() -> None:
 
     view = st.sidebar.radio(
         "Choose view",
-        options=("Overview", "Pair selection", "Pair inspection"),
+        options=("Overview", "Pair selection", "Pair inspection", "Trade proposals"),
     )
 
     st.title("RASA – Regime-Aware Statistical Arbitrage (Prototype)")
@@ -550,6 +787,9 @@ def main() -> None:
     elif view == "Pair inspection":
         run_single_pair_view()
 
+    # -------------------- Trade proposals --------------------
+    elif view == "Trade proposals":
+        run_trade_proposals_ui()
 
 if __name__ == "__main__":
     main()
