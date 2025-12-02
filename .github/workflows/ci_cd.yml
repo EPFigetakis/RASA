@@ -33,16 +33,29 @@ jobs:
           pytest      # or whatever command you use for tests
 
   deploy:
+  
     name: Deploy to server
     needs: test
-    # Only deploy when the push is to main AND tests passed
     if: github.ref == 'refs/heads/main'
-    runs-on: self-hosted   # <-- this is your server
-
+    runs-on: self-hosted
+  
     steps:
+      - name: Debug whoami & sudo -l
+        run: |
+          echo "WHOAMI:"
+          whoami
+          echo
+          echo "ID:"
+          id
+          echo
+          echo "WHICH SYSTEMCTL:"
+          which systemctl || echo "systemctl not in PATH"
+          echo
+          echo "SUDO -L:"
+          sudo -l
+  
       - name: Pull latest code on server and restart Streamlit
         run: |
-          cd /home/manoli/RASA
-          # This uses whatever remote you already configured (SSH or HTTPS)
+          cd /srv/streamlit-app
           git pull
-          sudo systemctl restart streamlit-app.service
+          sudo -n systemctl restart streamlit.service
