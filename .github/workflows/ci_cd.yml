@@ -56,6 +56,6 @@ jobs:
   
       - name: Pull latest code on server and restart Streamlit
         run: |
-          cd /srv/streamlit-app
+          cd /home/manoli/RASA/
           git pull
           sudo -n systemctl restart streamlit.service
