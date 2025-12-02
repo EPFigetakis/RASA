@@ -1,2 +1,0 @@
-rank,A,B,z,beta,sigma_resid,hl_resid_d,price_a,price_b,side,gross_target,shares_A,shares_B,shares_A_round,shares_B_round,open_cost_est,est_hold_days,est_pnl_to_exit,exit_plan,action
-12,D,RTX,2.238735848084968,0.2114271367798109,0.007593283928420641,1.294232526355296,61.58000183105469,176.97000122070312,SHORT_A/LONG_betaB,7957.861602832272,-106.67419803064487,7.848021038587142,-107,8,1.6009640411376953,3,101.86345043884232,"Exit at |z|≤0.50, hard stop |z|≥4.00, time stop 20d",ENTER_SHORT_A_LONG_betaB
