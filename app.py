@@ -125,13 +125,14 @@ def require_login():
         st.stop()  # Don't run the rest of the app until logged in
 
 # 🚧 Gate the app here
-require_login()
+if not os.getenv("RUNNING_TESTS"):
+    require_login()
 
 # ✅ If we reach here, the user is authenticated
-st.sidebar.write(f"Logged in as **{st.session_state['user']}**")
-if st.sidebar.button("Logout"):
-    st.session_state.clear()
-    st.rerun()
+    st.sidebar.write(f"Logged in as **{st.session_state['user']}**")
+    if st.sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
 
 
 @st.cache_data
@@ -231,6 +232,7 @@ def inject_global_styles() -> None:
 def init_session_state() -> None:
     """Initialize keys in st.session_state we want to reuse."""
     defaults = {
+        "user": None,
         "px": None,          # price panel
         "rets": None,        # returns panel
         "pairs_df": None,    # candidate pairs table
@@ -711,6 +713,7 @@ def run_trade_proposals_ui() -> None:
 # -----------------------------------------------------------------------------
 
 def main() -> None:
+    init_session_state()
     st.set_page_config(
         page_title="RASA Quant Prototype",
         layout="wide",
@@ -718,7 +721,7 @@ def main() -> None:
         
     )
     inject_global_styles()
-    init_session_state()
+    #init_session_state()
 
     app_meta = load_app_meta()
 
