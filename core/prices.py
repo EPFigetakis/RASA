@@ -29,7 +29,9 @@ Parquet files are stored under:
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -57,6 +59,71 @@ def ensure_dir(path: Path) -> Path:
     """Create directory if needed and return it."""
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Cache identity
+# ---------------------------------------------------------------------------
+
+def build_cache_key(
+    tickers: List[str],
+    start: str,
+    end: Optional[str],
+    interval: str = "1d",
+) -> str:
+    """
+    Deterministic cache key covering the FULL universe and download settings.
+
+    Two different universes (or date ranges/intervals) never collide, and
+    the same universe always hashes to the same key regardless of ticker
+    order. Unlike a key built from just the first ticker and ticker count,
+    this can't silently reuse another universe's cache.
+    """
+    fingerprint = json.dumps(
+        {
+            "tickers": sorted(t.upper() for t in tickers),
+            "start": start,
+            "end": end,
+            "interval": interval,
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+    return f"adjclose_{digest}"
+
+
+def _metadata_path(cache_path: Path) -> Path:
+    return cache_path.with_suffix(".json")
+
+
+def _write_cache_metadata(
+    cache_path: Path,
+    tickers: List[str],
+    start: str,
+    end: Optional[str],
+    interval: str,
+    px: pd.DataFrame,
+) -> None:
+    """Write a sidecar JSON file recording what's actually in the cache."""
+    meta = {
+        "tickers": sorted(t.upper() for t in tickers),
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "n_tickers_kept": int(px.shape[1]),
+        "n_rows": int(px.shape[0]),
+        "last_bar_date": px.index.max().date().isoformat() if len(px) else None,
+    }
+    _metadata_path(cache_path).write_text(json.dumps(meta, indent=2))
+
+
+def read_cache_metadata(cache_path: Path) -> Optional[dict]:
+    """Read the sidecar metadata for a cached parquet file, if present."""
+    meta_path = _metadata_path(cache_path)
+    if not meta_path.exists():
+        return None
+    return json.loads(meta_path.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +161,10 @@ def load_prices(
         Directory where parquet cache is stored.
         If None, defaults to: <PROJECT_ROOT>/cache/prices
     cache_key : str or None
-        Key for naming the parquet file. If None, a simple key based on
-        the first ticker, number of tickers, and start date is used.
+        Key for naming the parquet file. If None, a deterministic hash of
+        the full sorted ticker universe, start, end, and interval is used
+        (see `build_cache_key`), so different universes/settings never
+        collide on the same cache file.
     force_refresh : bool
         If True, ignore any existing cache and re-download.
 
@@ -111,16 +180,20 @@ def load_prices(
 
     tickers = [t.upper() for t in tickers]
 
-    # Build a default cache key if none is given
+    # Build a default cache key if none is given. This hashes the FULL
+    # universe + settings so different universes/date ranges/intervals
+    # can never collide on the same cache file (see build_cache_key).
     if cache_key is None:
-        first = tickers[0] if tickers else "NONE"
-        cache_key = f"adjclose_{first}_{len(tickers)}_{start}"
+        cache_key = build_cache_key(tickers, start, end, interval="1d")
 
     cache_path = data_dir / f"{cache_key}.parquet"
 
     # Load from cache if available
     if cache_path.exists() and not force_refresh:
         log(f"Loading cached prices from {cache_path.name} …")
+        meta = read_cache_metadata(cache_path)
+        if meta and meta.get("last_bar_date"):
+            log(f"Cache last bar: {meta['last_bar_date']} (use force_refresh=True to update)")
         px = pd.read_parquet(cache_path)
         # Ensure datetime index
         if not isinstance(px.index, pd.DatetimeIndex):
@@ -170,8 +243,9 @@ def load_prices(
     if not isinstance(px.index, pd.DatetimeIndex):
         px.index = pd.to_datetime(px.index)
 
-    # Save to parquet
+    # Save to parquet, plus sidecar metadata recording universe/settings/freshness
     px.to_parquet(cache_path)
+    _write_cache_metadata(cache_path, tickers, start, end, "1d", px)
     log(f"Saved cache to {cache_path}")
 
     return px

@@ -23,3 +23,9 @@ Thumbs.db
 auth.db
 *.db
 
+# Regenerable research cache/output (prices, pair candidates, logs)
+cache/
+data/
+results/
+logs/
+
