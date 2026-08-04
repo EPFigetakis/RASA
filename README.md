@@ -1,0 +1,91 @@
+# RASA — Regime-Aware Statistical Arbitrage
+
+A Streamlit research prototype for pairs-trading / statistical arbitrage: it downloads and
+caches price history, screens a ticker universe for cointegrated pairs (Engle-Granger),
+lets you inspect a single pair (spread, z-score, simplified backtest), and generates
+experimental trade proposals from the current signals.
+
+This is a research/portfolio project, not a production trading system — see
+`RASA_Project_Handover.docx` for the full design history, known limitations, and roadmap.
+
+## Requirements
+
+- Python 3.13 (a `.venv` in the repo root was built against this)
+- Dependencies pinned in `requirements.txt`
+
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Configuration
+
+- `config/data_config.json` — the ticker universe and history window (`data_source`,
+  `tickers`, `start_date`, `end_date`, `interval`). Edit this to change what gets downloaded
+  and screened.
+- `config/app_meta.json` — the version string and change log shown in the app's sidebar.
+  Bump `version` and append to `change_notes` when you ship a change (this is also how you
+  confirm the deployed instance is running the version you expect).
+
+Downloaded prices are cached under `cache/prices/` as Parquet files keyed by a hash of the
+ticker universe + date range + interval, with a JSON sidecar recording the tickers, settings,
+and last bar date — this is what `core/prices.py:build_cache_key` produces. Candidate pairs
+are cached under `cache/pairs/`. Everything under `cache/` is regenerable and gitignored.
+
+## Running the app
+
+```bash
+streamlit run app.py
+```
+
+### Authentication
+
+`app.py` is gated behind a login form backed by a local SQLite database (`core/auth.db`,
+gitignored — bcrypt password hashes, no plaintext). There's no self-service signup screen;
+create a user directly:
+
+```bash
+python3 - <<'EOF'
+import sqlite3, bcrypt
+
+conn = sqlite3.connect("core/auth.db")
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL)"
+)
+username, password = "your-username", "your-password"
+password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+conn.execute(
+    "INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)",
+    (username, password_hash),
+)
+conn.commit()
+EOF
+```
+
+For local development on a machine that isn't linked to a seeded `auth.db` (e.g. testing on
+a separate dev box), you can bypass login entirely:
+
+```bash
+RASA_DEV_SKIP_AUTH=1 streamlit run app.py
+```
+
+This is a local-dev-only escape hatch — never set it in the deployed environment.
+
+## Tests
+
+```bash
+pytest
+```
+
+Tests run fully offline (no real network/yfinance calls, no dependence on a seeded
+`auth.db`) via mocking and the `RUNNING_TESTS` env var, which `app.py` also checks to skip
+the login gate during test collection.
+
+## Deployment
+
+Pushing to `main` triggers `.github/workflows/ci_cd.yml`: it runs the test suite, then (on a
+self-hosted runner) pulls and restarts the live `streamlit.service` instance. Treat a push to
+`main` as a deploy, not just a commit.

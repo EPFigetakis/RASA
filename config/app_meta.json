@@ -1,10 +1,11 @@
 {
-  "version": "0.1.4 (12/2/2025)",
+  "version": "0.1.5 (8/3/2026)",
   "change_notes": [
     "Initial Streamlit prototype: load data, run pair selection, and inspect a single pair with backtest.",
     "Implement pair canidates save file for loading.",
     "Added a Login Page",
     "Added A trade proposal based on Pairs analysis",
-    "Added full CICD pipe automation for live app deployment"
+    "Added full CICD pipe automation for live app deployment",
+    "Phase 0 cleanup: removed superseded data loader/downloader modules, fixed price-cache key collisions with a universe-aware hash + freshness metadata, and added unit test coverage for core modules"
   ]
 }

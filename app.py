@@ -125,7 +125,12 @@ def require_login():
         st.stop()  # Don't run the rest of the app until logged in
 
 # 🚧 Gate the app here
-if not os.getenv("RUNNING_TESTS"):
+# RASA_DEV_SKIP_AUTH lets you run the app on a machine with no auth.db /
+# no seeded users (e.g. a dev box not linked to the deployed database).
+# Never set this in the deployed environment.
+DEV_SKIP_AUTH = os.getenv("RASA_DEV_SKIP_AUTH") == "1"
+
+if not os.getenv("RUNNING_TESTS") and not DEV_SKIP_AUTH:
     require_login()
 
 # ✅ If we reach here, the user is authenticated
@@ -133,6 +138,9 @@ if not os.getenv("RUNNING_TESTS"):
     if st.sidebar.button("Logout"):
         st.session_state.clear()
         st.rerun()
+elif DEV_SKIP_AUTH:
+    st.session_state.setdefault("user", "local-dev")
+    st.sidebar.warning("⚠️ Auth bypassed (RASA_DEV_SKIP_AUTH=1) — local dev only.")
 
 
 @st.cache_data
