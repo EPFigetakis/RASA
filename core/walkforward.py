@@ -33,7 +33,7 @@ Typical usage:
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple
 
@@ -549,10 +549,20 @@ def run_fold(
         if pair_res.spread.empty:
             continue
 
+        bt_kwargs = {}
+        if backtest_cfg.execution is not None:
+            leg_prices = pairs_mod.extract_pair_prices(px, pairs_mod.PairSpec(x=x, y=y))
+            bt_kwargs = dict(
+                leg_prices=leg_prices.reindex(pair_res.spread.index),
+                beta=beta,
+                log_space=hedge_cfg.use_log_prices,
+            )
+
         bt = strategy.backtest_spread_strategy(
             spread=pair_res.spread,
             signals=pair_res.signals,
             cfg=backtest_cfg,
+            **bt_kwargs,
         )
 
         pair_results[(x, y)] = pair_res
@@ -603,6 +613,12 @@ class WalkForwardResult:
     portfolio_equity: pd.Series
     portfolio_summary: Dict[str, float]
     diagnostics: pd.DataFrame
+    # Portfolio equity before any transaction/execution costs, for gross-vs-net
+    # comparison, and total execution costs by component (commission, spread,
+    # slippage, borrow, legacy per-unit cost), each already weighted like the
+    # portfolio (1/n_traded per pair).
+    portfolio_gross_equity: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    cost_summary: Dict[str, float] = field(default_factory=dict)
 
 
 def _empty_walk_forward_result() -> WalkForwardResult:
@@ -774,29 +790,53 @@ def run_walk_forward(
     }
 
     # ---- portfolio equity: equal-notional across concurrently-traded pairs ----
-    portfolio_start_capital = initial_capital
-    portfolio_chunks: List[pd.Series] = []
+    net_start = initial_capital
+    gross_start = initial_capital
+    net_chunks: List[pd.Series] = []
+    gross_chunks: List[pd.Series] = []
+    cost_totals: Dict[str, float] = {
+        "commission": 0.0, "spread": 0.0, "slippage": 0.0, "borrow": 0.0,
+        "per_unit_cost": 0.0, "total": 0.0,
+    }
 
     for fold, fr in zip(folds, fold_results):
         fold_dates = px.index[(px.index >= fold.trading_start) & (px.index < fold.trading_end)]
-        portfolio_pnl = pd.Series(0.0, index=fold_dates)
+        net_pnl = pd.Series(0.0, index=fold_dates)
+        gross_pnl = pd.Series(0.0, index=fold_dates)
 
         n_traded = len(fr.bt_results)
         if n_traded > 0:
             weight = 1.0 / n_traded
             for bt in fr.bt_results.values():
-                pnl = bt.pnl.reindex(fold_dates).fillna(0.0)
-                portfolio_pnl = portfolio_pnl.add(pnl * weight, fill_value=0.0)
+                net_pnl = net_pnl.add(bt.pnl.reindex(fold_dates).fillna(0.0) * weight, fill_value=0.0)
+                gross_pnl = gross_pnl.add(
+                    bt.gross_pnl.reindex(fold_dates).fillna(0.0) * weight, fill_value=0.0
+                )
+                total_cost = float(bt.costs.sum()) * weight
+                cost_totals["total"] += total_cost
+                if bt.cost_breakdown is not None:
+                    for comp in ("commission", "spread", "slippage", "borrow"):
+                        cost_totals[comp] += float(bt.cost_breakdown[comp].sum()) * weight
+                    cost_totals["per_unit_cost"] += (
+                        total_cost - float(bt.cost_breakdown["total"].sum()) * weight
+                    )
+                else:
+                    cost_totals["per_unit_cost"] += total_cost
 
-        fold_equity = portfolio_start_capital + portfolio_pnl.cumsum()
-        portfolio_chunks.append(fold_equity)
-        if not fold_equity.empty:
-            portfolio_start_capital = float(fold_equity.iloc[-1])
+        net_equity = net_start + net_pnl.cumsum()
+        gross_equity = gross_start + gross_pnl.cumsum()
+        net_chunks.append(net_equity)
+        gross_chunks.append(gross_equity)
+        if not net_equity.empty:
+            net_start = float(net_equity.iloc[-1])
+            gross_start = float(gross_equity.iloc[-1])
 
-    if portfolio_chunks:
-        portfolio_equity = pd.concat(portfolio_chunks).sort_index()
+    if net_chunks:
+        portfolio_equity = pd.concat(net_chunks).sort_index()
+        portfolio_gross_equity = pd.concat(gross_chunks).sort_index()
     else:
         portfolio_equity = pd.Series(dtype=float)
+        portfolio_gross_equity = pd.Series(dtype=float)
 
     portfolio_summary = _summarize_equity_curve(portfolio_equity, initial_capital)
 
@@ -806,6 +846,8 @@ def run_walk_forward(
         portfolio_equity=portfolio_equity,
         portfolio_summary=portfolio_summary,
         diagnostics=diagnostics,
+        portfolio_gross_equity=portfolio_gross_equity,
+        cost_summary=cost_totals,
     )
 
 

@@ -54,10 +54,12 @@ import pandas as pd
 try:
     import core.pairs as pairs_mod
     import core.panel as panel
+    import core.execution as execution
 except ModuleNotFoundError:
     # Fallback if run from within core/ directly
     import pairs as pairs_mod  # type: ignore
     import panel  # type: ignore
+    import execution  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -91,12 +93,17 @@ class BacktestConfig:
         Number of trading periods per year (252 for daily).
     risk_free_rate : float
         Annualized risk-free rate used for Sharpe calculations (in decimal form).
+    execution : core.execution.ExecutionCostConfig or None
+        Optional leg-level execution costs (commission, half-spread, slippage,
+        short borrow, fill delay). Requires `leg_prices` and `beta` to be passed
+        to backtest_spread_strategy. None = only `trade_cost_per_unit` applies.
     """
     initial_capital: float = 100_000.0
     notional_per_unit: float = 1.0
     trade_cost_per_unit: float = 0.0
     annualization_factor: int = 252
     risk_free_rate: float = 0.0
+    execution: Optional["execution.ExecutionCostConfig"] = None
 
 
 @dataclass
@@ -137,6 +144,7 @@ class BacktestResult:
     trades: pd.Series
     summary: Dict[str, float]
     metadata: Dict[str, Any]
+    cost_breakdown: Optional[pd.DataFrame] = None  # commission/spread/slippage/borrow/total
 
 
 # ---------------------------------------------------------------------------
@@ -201,9 +209,19 @@ def backtest_spread_strategy(
     cfg: BacktestConfig,
     regimes: Optional[pd.Series] = None,
     allowed_regimes: Optional[Sequence[int]] = None,
+    leg_prices: Optional[pd.DataFrame] = None,
+    beta: Optional[float] = None,
+    log_space: bool = False,
 ) -> BacktestResult:
     """
     Backtest a mean-reversion spread strategy given a spread and position signals.
+
+    Execution costs (optional): if `cfg.execution` is set, `leg_prices` (columns
+    "X", "Y", raw prices) and `beta` must be given. Positions are then delayed by
+    `fill_delay_days`, and commission / half-spread / slippage / short-borrow
+    costs are charged per leg (see core.execution) on top of `trade_cost_per_unit`.
+    Costs only cover trades inside the series: a position still open at the end
+    is not liquidated.
 
     PnL model:
         - One "spread unit" corresponds to long 1 Y and short beta X
@@ -257,6 +275,14 @@ def backtest_spread_strategy(
 
     positions = signals.astype(float)
 
+    exec_cfg = cfg.execution
+    if exec_cfg is not None:
+        if leg_prices is None or beta is None:
+            raise ValueError(
+                "cfg.execution is set, so leg_prices and beta are required."
+            )
+        positions = execution.apply_fill_delay(positions, exec_cfg.fill_delay_days)
+
     # Compute spread change (Δspread_t = spread_t - spread_{t-1})
     spread = spread.astype(float)
     spread_diff = spread.diff()
@@ -270,6 +296,18 @@ def backtest_spread_strategy(
     # Transaction costs: proportional to change in position
     pos_change = positions.diff().fillna(0.0)
     costs = cfg.trade_cost_per_unit * pos_change.abs()
+
+    cost_breakdown = None
+    if exec_cfg is not None:
+        cost_breakdown = execution.compute_execution_costs(
+            positions=positions,
+            leg_prices=leg_prices,
+            beta=float(beta),
+            notional_per_unit=cfg.notional_per_unit,
+            cfg=exec_cfg,
+            log_space=log_space,
+        )
+        costs = costs + cost_breakdown["total"]
 
     pnl = gross_pnl - costs
 
@@ -314,6 +352,8 @@ def backtest_spread_strategy(
         "max_drawdown": max_dd,
         "n_trades": n_trades,
         "avg_trade_cost": avg_trade_cost,
+        "gross_total_pnl": float(gross_pnl.sum()),
+        "total_costs": float(costs.sum()),
     }
 
     metadata: Dict[str, Any] = {
@@ -331,6 +371,7 @@ def backtest_spread_strategy(
         trades=pos_change,
         summary=summary,
         metadata=metadata,
+        cost_breakdown=cost_breakdown,
     )
 
 

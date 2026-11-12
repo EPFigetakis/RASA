@@ -273,3 +273,37 @@ def test_run_walk_forward_end_to_end_on_synthetic_multi_fold_panel(tmp_path, mon
     ]
     if not other_pairs.empty:
         assert int(other_pairs["fdr_reject"].sum()) < xy_fdr_hits
+
+
+def test_run_walk_forward_with_execution_costs_lowers_net_below_gross(tmp_path, monkeypatch):
+    from core import execution, pair_selection, strategy
+
+    monkeypatch.setattr(walkforward.paths, "cache_dir", lambda: tmp_path)
+    px = _cointegrated_panel(n=1600)
+
+    sel_cfg = pair_selection.PairSelectionConfig(max_pvalue=0.2, min_obs=100, max_pairs=10)
+    wf_cfg = walkforward.WalkForwardConfig(
+        formation_years=3.0, trading_years=1.0, min_formation_obs=252,
+        min_stable_folds=2, stability_lookback=3, zscore_window=30, fdr_alpha=0.10,
+    )
+
+    free = walkforward.run_walk_forward(
+        px, sel_cfg, strategy.BacktestConfig(notional_per_unit=1000.0), wf_cfg
+    )
+    costly_cfg = strategy.BacktestConfig(
+        notional_per_unit=1000.0,
+        execution=execution.ExecutionCostConfig(half_spread_bps=10.0, slippage_bps=5.0),
+    )
+    costly = walkforward.run_walk_forward(px, sel_cfg, costly_cfg, wf_cfg)
+
+    assert costly.cost_summary["total"] > 0
+    assert costly.cost_summary["spread"] > 0
+    assert free.cost_summary["total"] == 0
+    # Gross path is cost-free in both runs and identical when no delay is set.
+    assert costly.portfolio_gross_equity.iloc[-1] == pytest.approx(
+        free.portfolio_gross_equity.iloc[-1]
+    )
+    assert costly.portfolio_equity.iloc[-1] < free.portfolio_equity.iloc[-1]
+    assert costly.portfolio_equity.iloc[-1] == pytest.approx(
+        costly.portfolio_gross_equity.iloc[-1] - costly.cost_summary["total"]
+    )

@@ -94,9 +94,14 @@ result you'd actually stand behind.
 
 Each fold's formation-window candidate scan is cached to disk under
 `cache/pairs/walkforward/`, since rescanning the full universe once per fold is CPU-heavy —
-re-running the same window configuration is instant after the first pass. Execution-cost
-realism (bid/ask spread, slippage, borrow) is a known follow-up; the walk-forward backtest
-still uses the same flat per-unit cost model as the other views.
+re-running the same window configuration is instant after the first pass.
+
+**Execution costs** (`core/execution.py`) are priced per leg and on by default in this view:
+commission ($/share), half bid/ask spread and slippage (flat bps of traded notional), short
+borrow (annual bps on whichever leg is short), and an optional fill delay in days. The view
+shows gross-vs-net equity and a cost breakdown. Spread/slippage are assumptions, not observed
+quotes (the price panel is adjusted closes only), and positions still open at a fold's end are
+not liquidated. The other views still use the flat per-unit `trade_cost_per_unit` model.
 
 ## Tests
 

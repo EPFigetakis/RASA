@@ -31,7 +31,7 @@ import math
 
 
 # Import your core modules
-from core import panel, pair_selection, pairs as pairs_mod, strategy, walkforward
+from core import panel, pair_selection, pairs as pairs_mod, strategy, walkforward, execution
 
 
 APP_META_PATH = Path("config/app_meta.json")
@@ -774,7 +774,56 @@ def run_walk_forward_ui() -> None:
         min_obs=int(min_obs),
         max_pairs=int(max_pairs),
     )
-    backtest_cfg = strategy.BacktestConfig(initial_capital=100_000.0, trade_cost_per_unit=0.0)
+    with st.expander("Execution costs & sizing", expanded=True):
+        notional_per_pair = st.number_input(
+            "Notional per pair ($, long-leg Y)", min_value=1.0, max_value=1_000_000.0,
+            value=10_000.0, step=1_000.0,
+            help="Dollar size of one spread unit. Costs are only meaningful at a real "
+                 "dollar scale; the portfolio averages pairs equally within each fold.",
+        )
+        use_costs = st.checkbox("Model execution costs", value=True)
+        exec_cfg = None
+        if use_costs:
+            ec1, ec2, ec3 = st.columns(3)
+            with ec1:
+                commission_per_share = st.number_input(
+                    "Commission ($/share)", min_value=0.0, max_value=0.1, value=0.005,
+                    step=0.001, format="%.4f",
+                )
+                half_spread_bps = st.number_input(
+                    "Half bid/ask spread (bps)", min_value=0.0, max_value=100.0, value=2.0, step=0.5,
+                )
+            with ec2:
+                slippage_bps = st.number_input(
+                    "Slippage (bps)", min_value=0.0, max_value=100.0, value=1.0, step=0.5,
+                )
+                borrow_bps = st.number_input(
+                    "Short borrow (bps/yr)", min_value=0.0, max_value=2000.0, value=50.0, step=10.0,
+                )
+            with ec3:
+                fill_delay = st.number_input(
+                    "Fill delay (days)", min_value=0, max_value=5, value=0, step=1,
+                    help="0 = fill at the signal-day close; 1 = fill one trading day later.",
+                )
+            exec_cfg = execution.ExecutionCostConfig(
+                commission_per_share=float(commission_per_share),
+                half_spread_bps=float(half_spread_bps),
+                slippage_bps=float(slippage_bps),
+                borrow_bps_annual=float(borrow_bps),
+                fill_delay_days=int(fill_delay),
+            )
+            st.caption(
+                "Spread and slippage are flat bps assumptions (the price panel has no "
+                "bid/ask quotes). Positions still open at the end of a fold are not "
+                "liquidated."
+            )
+
+    backtest_cfg = strategy.BacktestConfig(
+        initial_capital=100_000.0,
+        notional_per_unit=float(notional_per_pair),
+        trade_cost_per_unit=0.0,
+        execution=exec_cfg,
+    )
     wf_cfg = walkforward.WalkForwardConfig(
         formation_years=float(formation_years),
         trading_years=float(trading_years),
@@ -815,7 +864,23 @@ def run_walk_forward_ui() -> None:
     mcol3.metric("Sharpe", f"{s['sharpe']:.2f}" if pd.notna(s['sharpe']) else "N/A")
     mcol4.metric("Max drawdown", f"{s['max_drawdown']:.2%}")
 
-    st.line_chart(result.portfolio_equity.to_frame(name="portfolio_equity"))
+    chart_df = pd.DataFrame(
+        {
+            "net (after costs)": result.portfolio_equity,
+            "gross (before costs)": result.portfolio_gross_equity,
+        }
+    )
+    st.line_chart(chart_df)
+
+    cs = result.cost_summary
+    if cs and cs.get("total", 0.0) > 0:
+        st.write("### Execution cost breakdown (portfolio-weighted, $)")
+        ccols = st.columns(5)
+        ccols[0].metric("Total", f"{cs['total']:,.2f}")
+        ccols[1].metric("Commission", f"{cs['commission']:,.2f}")
+        ccols[2].metric("Spread + slippage", f"{cs['spread'] + cs['slippage']:,.2f}")
+        ccols[3].metric("Short borrow", f"{cs['borrow']:,.2f}")
+        ccols[4].metric("Other per-unit", f"{cs['per_unit_cost']:,.2f}")
 
     with st.expander("Show fold-by-fold pair detail"):
         st.dataframe(result.fold_summary, use_container_width=True)
