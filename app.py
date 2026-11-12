@@ -31,7 +31,7 @@ import math
 
 
 # Import your core modules
-from core import panel, pair_selection, pairs as pairs_mod, strategy
+from core import panel, pair_selection, pairs as pairs_mod, strategy, walkforward
 
 
 APP_META_PATH = Path("config/app_meta.json")
@@ -715,6 +715,111 @@ def run_trade_proposals_ui() -> None:
         st.dataframe(proposals_df, use_container_width=True)
 
 
+def run_walk_forward_ui() -> None:
+    """UI to run the formation/trading walk-forward loop (Phase 1 validity check)."""
+    px: Optional[pd.DataFrame] = st.session_state.get("px")
+    if px is None:
+        st.warning("Load data first (left sidebar).")
+        return
+
+    st.write("## Walk-forward validation")
+    st.caption(
+        "Pairs are only ever selected, and hedge ratios only ever estimated, from a "
+        "formation window strictly before the trading window they're scored on — "
+        "this is what makes the results defensible instead of look-ahead-biased."
+    )
+
+    st.write("### Window configuration")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        formation_years = st.number_input(
+            "Formation window (years)", min_value=1.0, max_value=10.0, value=3.0, step=0.5
+        )
+    with col2:
+        trading_years = st.number_input(
+            "Trading window (years)", min_value=0.25, max_value=5.0, value=1.0, step=0.25
+        )
+    with col3:
+        mode = st.radio("Mode", options=("rolling", "expanding"), horizontal=True)
+
+    col4, col5 = st.columns(2)
+    with col4:
+        fdr_alpha = st.slider(
+            "FDR alpha (multiple-testing control)",
+            min_value=0.01, max_value=0.25, value=0.10, step=0.01,
+        )
+    with col5:
+        min_stable_folds = st.number_input(
+            "Min folds a pair must survive FDR in to be traded",
+            min_value=1, max_value=5, value=2, step=1,
+        )
+
+    with st.expander("Pair selection settings (applied within each formation window)"):
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            max_pvalue = st.slider(
+                "Max cointegration p-value", min_value=0.0, max_value=0.2, value=0.05, step=0.005
+            )
+        with sc2:
+            min_obs = st.number_input(
+                "Min overlapping observations", min_value=50, max_value=5000, value=252, step=10
+            )
+        with sc3:
+            max_pairs = st.number_input(
+                "Max candidate pairs per fold", min_value=5, max_value=200, value=50, step=5
+            )
+
+    sel_cfg = pair_selection.PairSelectionConfig(
+        max_pvalue=max_pvalue,
+        min_obs=int(min_obs),
+        max_pairs=int(max_pairs),
+    )
+    backtest_cfg = strategy.BacktestConfig(initial_capital=100_000.0, trade_cost_per_unit=0.0)
+    wf_cfg = walkforward.WalkForwardConfig(
+        formation_years=float(formation_years),
+        trading_years=float(trading_years),
+        mode=mode,
+        min_stable_folds=int(min_stable_folds),
+        fdr_alpha=float(fdr_alpha),
+    )
+
+    if st.button("Run walk-forward validation", type="primary"):
+        with st.spinner("Running walk-forward folds (this scans the universe once per fold)…"):
+            try:
+                result = walkforward.run_walk_forward(px, sel_cfg, backtest_cfg, wf_cfg)
+            except Exception as e:
+                st.error(f"Walk-forward run failed: {e}")
+            else:
+                st.session_state["wf_result"] = result
+
+    result: Optional[walkforward.WalkForwardResult] = st.session_state.get("wf_result")
+    if result is None:
+        return
+
+    if result.portfolio_equity.empty:
+        st.warning(
+            "No folds could be generated — the formation window is likely longer than "
+            "the available price history. Try a shorter formation window."
+        )
+        return
+
+    st.write("### Fold diagnostics")
+    st.caption("Candidate counts shrinking left-to-right (raw -> FDR survivors -> traded) is expected.")
+    st.dataframe(result.diagnostics, use_container_width=True)
+
+    st.write("### Portfolio equity curve (out-of-sample, chained across folds)")
+    s = result.portfolio_summary
+    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+    mcol1.metric("Total return", f"{s['total_return']:.2%}")
+    mcol2.metric("Annual return", f"{s['annual_return']:.2%}")
+    mcol3.metric("Sharpe", f"{s['sharpe']:.2f}" if pd.notna(s['sharpe']) else "N/A")
+    mcol4.metric("Max drawdown", f"{s['max_drawdown']:.2%}")
+
+    st.line_chart(result.portfolio_equity.to_frame(name="portfolio_equity"))
+
+    with st.expander("Show fold-by-fold pair detail"):
+        st.dataframe(result.fold_summary, use_container_width=True)
+
 
 # -----------------------------------------------------------------------------
 # Main Streamlit app
@@ -744,7 +849,13 @@ def main() -> None:
 
     view = st.sidebar.radio(
         "Choose view",
-        options=("Overview", "Pair selection", "Pair inspection", "Trade proposals"),
+        options=(
+            "Overview",
+            "Pair selection",
+            "Pair inspection",
+            "Trade proposals",
+            "Walk-forward validation",
+        ),
     )
 
     st.title("RASA – Regime-Aware Statistical Arbitrage (Prototype)")
@@ -801,6 +912,10 @@ def main() -> None:
     # -------------------- Trade proposals --------------------
     elif view == "Trade proposals":
         run_trade_proposals_ui()
+
+    # -------------------- Walk-forward validation --------------------
+    elif view == "Walk-forward validation":
+        run_walk_forward_ui()
 
 if __name__ == "__main__":
     main()

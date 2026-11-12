@@ -33,7 +33,8 @@ pip install -r requirements.txt
 Downloaded prices are cached under `cache/prices/` as Parquet files keyed by a hash of the
 ticker universe + date range + interval, with a JSON sidecar recording the tickers, settings,
 and last bar date — this is what `core/prices.py:build_cache_key` produces. Candidate pairs
-are cached under `cache/pairs/`. Everything under `cache/` is regenerable and gitignored.
+are cached under `cache/pairs/`, and per-fold walk-forward candidate scans under
+`cache/pairs/walkforward/`. Everything under `cache/` is regenerable and gitignored.
 
 ## Running the app
 
@@ -73,6 +74,29 @@ RASA_DEV_SKIP_AUTH=1 streamlit run app.py
 ```
 
 This is a local-dev-only escape hatch — never set it in the deployed environment.
+
+### Walk-forward validation
+
+The **Pair selection** and **Pair inspection** views select pairs and estimate hedge ratios
+from the *entire* price history at once — quick to use, but the cointegration p-value and
+hedge ratio for a pair traded in, say, 2018 are partly informed by data from 2024. That's
+look-ahead bias, and it makes those results non-defensible as research.
+
+The **Walk-forward validation** view (`core/walkforward.py`) fixes this: it splits history
+into a rolling (or expanding) sequence of formation windows and trading windows, selecting
+pairs and freezing hedge ratios only from each formation window, then trading and scoring
+strictly on the following, previously-unseen trading window. It also applies a
+Benjamini-Hochberg false-discovery-rate correction on top of the raw cointegration p-values
+(scanning ~185 tickers is ~17,000 pairwise tests per fold — some will look cointegrated by
+chance) and requires a pair to clear that bar in multiple consecutive folds before it's
+trusted enough to trade. Use this view, not the static Pair selection view, when you want a
+result you'd actually stand behind.
+
+Each fold's formation-window candidate scan is cached to disk under
+`cache/pairs/walkforward/`, since rescanning the full universe once per fold is CPU-heavy —
+re-running the same window configuration is instant after the first pass. Execution-cost
+realism (bid/ask spread, slippage, borrow) is a known follow-up; the walk-forward backtest
+still uses the same flat per-unit cost model as the other views.
 
 ## Tests
 
