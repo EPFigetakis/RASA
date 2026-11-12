@@ -128,6 +128,18 @@ age, and stable `idea_id` / `batch_id` hashes. An idea is a **target position**,
 account positions don't exist yet, so nothing is netted against holdings. Sizing treats raw-price
 hedges as `beta` shares of X per share of Y, and log-price hedges as a dollar elasticity.
 
+## Orders
+
+`core/orders.py` is the contract between trade ideas and (future) execution. `plan_orders(ideas,
+current_positions, managed_symbols=..., close_out_prices=...)` compares each idea's *target*
+positions with what is held and returns an `OrderPlan` of `OrderTicket`s in `PROPOSED` state, so
+re-running against the same holdings never doubles a position. Tickets have deterministic ids
+(same idea + legs + data date -> same id), a validated lifecycle (`PROPOSED -> APPROVED ->
+SUBMITTED -> PARTIALLY_FILLED/FILLED`, or `REJECTED`/`CANCELLED`) with a history of changes,
+fill tracking with overfill protection, and an exact JSON round-trip. Ideas that share a symbol
+are reported as conflicts rather than netted, and positions outside `managed_symbols` are never
+closed. Nothing in the UI uses this yet; risk gates and the paper broker come next.
+
 ## Tests
 
 ```bash
