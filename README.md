@@ -118,6 +118,16 @@ not liquidated. The other views still use the flat per-unit `trade_cost_per_unit
   universe/settings, and warns if the prices changed since the scan. Selections saved before
   this feature have no record and load with a warning.
 
+## Trade proposals
+
+`core/trade_proposals.py` turns the latest pair signals into typed `TradeIdea` objects
+(no Streamlit dependency): `generate_trade_ideas(px, pairs_df, ProposalConfig(...))` returns a
+`ProposalBatch` with the ideas, every skipped pair and its reason, the price data's last bar and
+age, and stable `idea_id` / `batch_id` hashes. An idea is a **target position**, not an order:
+`bars_in_position` / `is_new_signal` distinguish a fresh entry from a long-held signal, but
+account positions don't exist yet, so nothing is netted against holdings. Sizing treats raw-price
+hedges as `beta` shares of X per share of Y, and log-price hedges as a dollar elasticity.
+
 ## Tests
 
 ```bash

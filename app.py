@@ -31,7 +31,7 @@ import math
 
 
 # Import your core modules
-from core import panel, prices, pair_selection, pairs as pairs_mod, strategy, walkforward, execution
+from core import panel, prices, pair_selection, pairs as pairs_mod, strategy, walkforward, execution, trade_proposals
 
 
 APP_META_PATH = Path("config/app_meta.json")
@@ -571,165 +571,76 @@ def run_trade_proposals_ui() -> None:
 
     use_log_prices = st.checkbox("Use log prices for hedge estimation", value=False)
     add_intercept = st.checkbox("Include intercept in hedge regression", value=False)
+    whole_shares = st.checkbox("Round to whole shares", value=False)
 
     generate = st.button("Generate trade proposals", type="primary")
 
     if not generate:
         return
 
-    # ---------------- Signal configuration ----------------
-    hedge_cfg = pairs_mod.HedgeConfig(
-        use_log_prices=use_log_prices,
-        add_intercept=add_intercept,
-    )
-    signal_cfg = pairs_mod.SignalConfig(
-        entry_z=float(entry_z),
-        exit_z=float(exit_z),
-        max_position=1,
-    )
-
-    # ---------------- Build proposals ----------------
-    proposals = []
-
-    subset = pairs_df.iloc[:top_n].copy()
-
-    for i, row in subset.iterrows():
-        x = str(row["x"])
-        y = str(row["y"])
-        spec = pairs_mod.PairSpec(x=x, y=y)
-
-        try:
-            pair_res = pairs_mod.build_pair_signals_from_panel(
-                px=px,
-                spec=spec,
-                hedge_cfg=hedge_cfg,
-                signal_cfg=signal_cfg,
-                zscore_window=int(zscore_window),
-            )
-        except Exception as e:
-            st.warning(f"Failed to build signals for pair {x}/{y}: {e}")
-            continue
-
-        # Latest signal / z-score / spread
-        sig = pair_res.signals.dropna()
-        if sig.empty:
-            continue
-
-        last_pos = float(sig.iloc[-1])
-        last_time = sig.index[-1]
-
-        # Skip flat positions (no trade)
-        if last_pos == 0.0:
-            continue
-
-        z_series = pair_res.zscore.dropna()
-        if last_time in z_series.index:
-            z_last = float(z_series.loc[last_time])
-        elif not z_series.empty:
-            z_last = float(z_series.iloc[-1])
-        else:
-            z_last = float("nan")
-
-        spread_series = pair_res.spread.dropna()
-        if last_time in spread_series.index:
-            spread_last = float(spread_series.loc[last_time])
-        elif not spread_series.empty:
-            spread_last = float(spread_series.iloc[-1])
-        else:
-            spread_last = float("nan")
-
-        # Last prices
-        # If the exact timestamp isn't in px (due to alignment), fall back to last non-NaN.
-        try:
-            price_y = float(px[y].dropna().loc[:last_time].iloc[-1])
-            price_x = float(px[x].dropna().loc[:last_time].iloc[-1])
-        except Exception:
-            # Worst case: just take last available prices
-            price_y = float(px[y].dropna().iloc[-1])
-            price_x = float(px[x].dropna().iloc[-1])
-
-        beta = float(pair_res.hedge_ratio)
-
-        # Approximate notionally 1 "spread unit" cost:
-        approx_unit_cost = abs(price_y) + abs(beta) * abs(price_x)
-        if approx_unit_cost <= 0:
-            units = 0.0
-        else:
-            units = notional_per_pair / approx_unit_cost
-
-        # Position sign: +1 = long spread (long Y, short X); -1 = short spread
-        # units is positive notionally; we attach the sign afterwards
-        signed_units = units * last_pos
-
-        qty_y = signed_units           # + => buy Y, - => sell Y
-        qty_x = -beta * signed_units   # hedge leg
-
-        if last_pos > 0:
-            action = "LONG spread (buy Y, sell X)"
-        elif last_pos < 0:
-            action = "SHORT spread (sell Y, buy X)"
-        else:
-            action = "FLAT"
-
-        proposals.append(
-            {
-                "pair": f"{x}/{y}",
-                "x": x,
-                "y": y,
-                "as_of": last_time,
-                "action": action,
-                "position": last_pos,
-                "units_est": units,
-                "qty_y_est": qty_y,
-                "qty_x_est": qty_x,
-                "price_y": price_y,
-                "price_x": price_x,
-                "beta": beta,
-                "zscore": z_last,
-                "spread": spread_last,
-                "notional_target": notional_per_pair,
-                "pvalue": float(row.get("pvalue", float("nan"))),
-                "half_life": float(row.get("half_life", float("nan"))),
-            }
+    # ---------------- Build proposals (all logic lives in core.trade_proposals) ----------------
+    try:
+        cfg = trade_proposals.ProposalConfig(
+            top_n=int(top_n),
+            notional_per_pair=float(notional_per_pair),
+            entry_z=float(entry_z),
+            exit_z=float(exit_z),
+            zscore_window=int(zscore_window),
+            use_log_prices=use_log_prices,
+            add_intercept=add_intercept,
+            whole_shares=whole_shares,
         )
+        batch = trade_proposals.generate_trade_ideas(px, pairs_df, cfg)
+    except ValueError as e:
+        st.error(f"Invalid proposal settings: {e}")
+        return
 
-    if not proposals:
+    st.caption(
+        f"Prices through **{batch.as_of.date() if batch.as_of is not None else 'n/a'}** · "
+        f"batch `{batch.batch_id}` · {batch.n_pairs_scanned} pairs scanned"
+    )
+    for w in batch.warnings:
+        st.warning(w)
+
+    flat = sum(1 for s_ in batch.skipped if s_.reason == "flat")
+    problems = [s_ for s_ in batch.skipped if s_.reason != "flat"]
+    for s_ in problems:
+        st.warning(f"Skipped {s_.pair}: {s_.reason}")
+
+    if not batch.ideas:
         st.info(
-            "No actionable trades found among the top "
-            f"{top_n} pairs with the current thresholds."
+            f"No actionable trades among the top {top_n} pairs with the current "
+            f"thresholds ({flat} flat)."
         )
         return
 
-    proposals_df = pd.DataFrame(proposals)
+    proposals_df = trade_proposals.ideas_to_frame(batch.ideas)
+    proposals_df["status"] = proposals_df["is_new_signal"].map(
+        {True: "NEW today", False: "HELD"}
+    )
 
-    # Sort by |zscore| (most extreme first)
-    if "zscore" in proposals_df.columns:
-        proposals_df = proposals_df.reindex(
-            proposals_df["zscore"].abs().sort_values(ascending=False).index
-        )
-
-    st.write(f"### Proposed trades ({len(proposals_df)} found)")
+    st.write(f"### Target positions ({len(proposals_df)} pairs, {flat} flat)")
+    st.caption(
+        "These are *target positions*, not orders. Without account positions the app "
+        "cannot tell what is already held; **HELD** signals were entered on an earlier bar."
+    )
 
     display_cols = [
-        "pair",
-        "as_of",
-        "action",
-        "zscore",
-        "price_x",
-        "price_y",
-        "beta",
-        "qty_y_est",
-        "qty_x_est",
-        "notional_target",
-        "pvalue",
-        "half_life",
+        "pair", "side", "status", "bars_in_position", "zscore",
+        "price_x", "price_y", "beta", "qty_x", "qty_y",
+        "gross_notional", "net_notional", "pvalue", "half_life", "idea_id",
     ]
-    display_cols = [c for c in display_cols if c in proposals_df.columns]
-
     st.dataframe(proposals_df[display_cols], use_container_width=True)
 
     with st.expander("Show full proposal table"):
         st.dataframe(proposals_df, use_container_width=True)
+
+    st.download_button(
+        "Download ideas (CSV)",
+        proposals_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"trade_ideas_{batch.batch_id}.csv",
+        mime="text/csv",
+    )
 
 
 def run_walk_forward_ui() -> None:

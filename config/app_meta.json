@@ -1,5 +1,5 @@
 {
-  "version": "0.1.8 (11/12/2026)",
+  "version": "0.1.9 (11/12/2026)",
   "change_notes": [
     "Initial Streamlit prototype: load data, run pair selection, and inspect a single pair with backtest.",
     "Implement pair canidates save file for loading.",
@@ -9,6 +9,7 @@
     "Phase 0 cleanup: removed superseded data loader/downloader modules, fixed price-cache key collisions with a universe-aware hash + freshness metadata, and added unit test coverage for core modules",
     "Phase 1 (start): added a formation/trading walk-forward validation loop with FDR-controlled, multi-fold-stable pair selection, replacing look-ahead-biased full-sample pair scoring; new Walk-forward validation view",
     "Phase 1 (cont.): added leg-level execution costs (commission, half-spread, slippage, short borrow, fill delay) to the backtester and walk-forward, with gross-vs-net equity and a cost breakdown in the Walk-forward validation view",
-    "Cache freshness: sidebar shows the price cache's last bar and staleness, 'Update prices' appends only new bars (full re-download if history was restated), and saved pair selections record the prices/settings they came from and refuse to load against a different universe or settings"
+    "Cache freshness: sidebar shows the price cache's last bar and staleness, 'Update prices' appends only new bars (full re-download if history was restated), and saved pair selections record the prices/settings they came from and refuse to load against a different universe or settings",
+    "Phase 2 (start): moved trade-proposal logic out of the UI into core/trade_proposals.py (typed TradeIdea, stable idea/batch ids, skipped-pair reasons, NEW-vs-HELD status); fixed hedge-leg sizing for log-price hedges; ideas are shown as target positions with CSV download"
   ]
 }
