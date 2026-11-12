@@ -185,3 +185,23 @@ def compute_execution_costs(
     ).fillna(0.0)
     out["total"] = out[["commission", "spread", "slippage", "borrow"]].sum(axis=1)
     return out
+
+
+def trade_cost(shares: float, price: float, cfg: ExecutionCostConfig) -> dict:
+    """
+    Cost of one fill of `shares` (absolute) at `price`, split by component.
+
+    Scalar counterpart of the trading-cost part of `compute_execution_costs`
+    (commission, half-spread, slippage); borrow is charged separately, daily.
+    """
+    shares = abs(float(shares))
+    notional = shares * float(price)
+    commission = cfg.commission_per_share * shares + cfg.commission_bps / 1e4 * notional
+    spread = cfg.half_spread_bps / 1e4 * notional
+    slippage = cfg.slippage_bps / 1e4 * notional
+    return {
+        "commission": commission,
+        "spread": spread,
+        "slippage": slippage,
+        "total": commission + spread + slippage,
+    }

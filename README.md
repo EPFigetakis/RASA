@@ -155,6 +155,21 @@ and, unless `require_manual_approval` is turned off, leaves passing ones PROPOSE
 Not covered yet: sector/correlation limits, borrow availability, real liquidity. The
 `environment` field is recorded in reports but nothing enforces paper-vs-live separation yet.
 
+## Portfolio ledger & simulator
+
+`core/portfolio.py` is leg-level accounting from actual share counts and fill prices: cash,
+average-cost positions, realized/unrealized PnL per symbol, fees and short borrow tracked
+separately, with the identity `equity - initial_cash = realized + unrealized - fees - borrow`
+(tested). `Portfolio.apply_ticket_fills` books an `OrderTicket`'s fills, and
+`Portfolio.quantities()` feeds straight back into `orders.plan_orders`, so a filled ticket
+produces no further orders. `simulate_targets` replays a table of target share positions over a
+price panel (trade at the close, execution costs, fill delay, daily borrow); in raw-price space
+with fixed shares and zero costs it reproduces `strategy.backtest_spread_strategy`'s equity
+curve to the cent, and with costs it matches the `core/execution.py` model (both tested).
+`reconcile(expected, actual)` lists position breaks. Not modelled: margin/buying power,
+interest on cash, dividends on shorts, corporate actions. The Streamlit views still use the
+older scalar backtest.
+
 ## Tests
 
 ```bash
