@@ -1,0 +1,16 @@
+{
+  "environment": "research",
+  "capital_base": 100000,
+  "max_gross_exposure_pct": 1.0,
+  "max_net_exposure_pct": 0.10,
+  "max_concurrent_pairs": 10,
+  "max_symbol_exposure_pct": 0.10,
+  "max_pair_notional": 10000,
+  "min_price": 5.0,
+  "max_data_age_business_days": 2,
+  "allowed_order_types": ["MARKET", "LIMIT"],
+  "allow_fractional_shares": false,
+  "max_daily_loss_pct": 0.02,
+  "max_drawdown_pct": 0.10,
+  "require_manual_approval": true
+}

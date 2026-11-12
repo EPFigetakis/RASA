@@ -140,6 +140,21 @@ fill tracking with overfill protection, and an exact JSON round-trip. Ideas that
 are reported as conflicts rather than netted, and positions outside `managed_symbols` are never
 closed. Nothing in the UI uses this yet; risk gates and the paper broker come next.
 
+## Risk gates
+
+`core/risk.py` checks every proposed ticket against `config/trading_config.json` (capital base,
+gross/net exposure, max concurrent pairs, per-symbol and per-pair caps, minimum price, max data
+age, allowed order types, whole-share rule, daily-loss / drawdown kill switch, manual-approval
+flag). `evaluate_plan(plan, cfg, prices, account, data_age_business_days)` returns a `RiskReport`
+with a pass/fail per check per ticket and a reason for every rejection; unknown config keys are
+an error. Tickets are tested in plan order against a running projected portfolio, so a rejected
+ticket doesn't use up capacity. Tickets that only reduce risk (close-outs, shrinking a position)
+skip the exposure/price/staleness/kill-switch checks so the system can always get out. Ideas
+that overlap on a symbol are rejected, never netted. `apply_decisions` rejects failed tickets
+and, unless `require_manual_approval` is turned off, leaves passing ones PROPOSED for a human.
+Not covered yet: sector/correlation limits, borrow availability, real liquidity. The
+`environment` field is recorded in reports but nothing enforces paper-vs-live separation yet.
+
 ## Tests
 
 ```bash
