@@ -186,6 +186,25 @@ breaks. No margin check (cash can go negative; the risk layer limits size), and 
 DAY leg can leave a pair one-legged - visible in the ticket history. Nothing in the UI uses the
 broker yet; the daily runner (Phase 4) will drive it.
 
+## Daily runner
+
+`python scripts/run_daily_proposals.py run` is the non-UI pipeline (paper only): load prices
+(appending new bars unless `--no-update`) -> **freshness gate** (older than
+`max_data_age_business_days` aborts before touching the broker) -> advance the paper broker to
+the latest bar (earlier approved tickets fill) -> trade ideas from the *saved* pair selection ->
+order plan against the broker's holdings (held pairs that went flat get close-out tickets) ->
+risk gates -> a run record in `state/runs/R<id>.json`. It never rescans the universe (run pair
+selection in the app) and never submits orders: passing tickets stay `PROPOSED`. Release them
+with `python scripts/run_daily_proposals.py approve RUN_ID --all --by <you>` (or `--ticket ID`);
+that is refused if the broker's holdings or last bar changed since the run, and rejected tickets
+can never be approved. `list` shows recent runs; `run --dry-run` computes and prints without
+writing. Re-running a day with the same inputs gives the same run id and tickets, and tickets
+already with the broker aren't proposed again. A lock file stops two runs overlapping.
+Exit codes: `0` ok, `1` unexpected error, `2` precondition failed or data too stale, `3` kill
+switch tripped; logs go to `logs/daily_runner.log`. The runner refuses a `live` risk
+environment. Scheduling (cron/systemd timer) is deliberately left to you until you trust it;
+`state/` is gitignored and holds real account history, so back it up.
+
 ## Tests
 
 ```bash

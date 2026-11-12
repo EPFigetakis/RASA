@@ -29,3 +29,6 @@ data/
 results/
 logs/
 
+
+# Runtime state (paper-broker account, run records, lock) - not regenerable, never commit
+state/
