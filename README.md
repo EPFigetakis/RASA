@@ -205,6 +205,24 @@ switch tripped; logs go to `logs/daily_runner.log`. The runner refuses a `live` 
 environment. Scheduling (cron/systemd timer) is deliberately left to you until you trust it;
 `state/` is gitignored and holds real account history, so back it up.
 
+## Monitoring & alerts
+
+The **Paper trading monitor** view shows alerts first, then equity / PnL / drawdown / gross and
+net exposure against the risk limits, the equity curve, positions with unrealized PnL, working
+orders, recent daily runs (with each ticket's risk decision) and the broker audit log. Risk-approved
+proposals from the latest run appear in an approval panel: pick tickets, tick the confirmation box,
+and "Approve & submit" sends them to the paper broker (same checks as the CLI `approve`).
+
+`python scripts/check_health.py [--json]` prints the same alerts and exits `0` (clear), `1`
+(warnings), `2` (critical) or `3` (could not check), so a cron job or mail wrapper can notify
+you. Alerts: **critical** - stale/missing prices, last run aborted or hit the kill switch, kill
+switch active, exposure over its limit, a pair cancelled part-filled and still held (one-legged),
+positions that disagree with the fills recorded on tickets; **warning** - no/overdue daily run,
+broker behind the price data, drawdown or exposure at 80%+ of its limit, tickets working too long,
+risk-approved proposals left unreviewed, ideas the planner could not ticket. It is read-only
+and does not push notifications itself (no email/webhook credentials are stored); wire the exit
+code into whatever you already use.
+
 ## Tests
 
 ```bash

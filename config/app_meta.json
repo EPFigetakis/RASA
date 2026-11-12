@@ -1,5 +1,5 @@
 {
-  "version": "0.1.14 (11/12/2026)",
+  "version": "0.1.15 (11/12/2026)",
   "change_notes": [
     "Initial Streamlit prototype: load data, run pair selection, and inspect a single pair with backtest.",
     "Implement pair canidates save file for loading.",
@@ -15,6 +15,7 @@
     "Phase 2: added core/risk.py and config/trading_config.json - per-ticket pre-trade risk gates (exposure, pair count, symbol/pair caps, price, data age, kill switch) with recorded reasons; risk-reducing tickets always allowed (not wired into the UI yet)",
     "Phase 2/3 groundwork: added core/portfolio.py - leg-level ledger (cash, average-cost positions, fills, fees, borrow, per-symbol PnL, reconciliation) and a target-share simulator that reproduces the scalar backtest exactly at zero cost (not wired into the UI yet)",
     "Phase 3: added core/broker_base.py (broker interface) and core/broker_paper.py - a persistent SQLite paper broker with idempotent ticket submission, market/limit/partial fills, DAY expiry, borrow, audit log, equity history and reconciliation (not wired into the UI yet)",
-    "Phase 4: added the non-UI daily runner (core/daily_run.py + scripts/run_daily_proposals.py) - refresh prices, freshness gate, advance the paper broker, propose risk-checked tickets into a saved run record, and a separate explicit approve-and-submit step; idempotent, single-instance, scheduler-friendly exit codes"
+    "Phase 4: added the non-UI daily runner (core/daily_run.py + scripts/run_daily_proposals.py) - refresh prices, freshness gate, advance the paper broker, propose risk-checked tickets into a saved run record, and a separate explicit approve-and-submit step; idempotent, single-instance, scheduler-friendly exit codes",
+    "Phase 4: monitoring - core/monitoring.py health snapshot and ranked alerts (stale data, overdue run, kill switch, drawdown/exposure near limits, one-legged pairs, reconciliation breaks, stuck/unreviewed tickets), scripts/check_health.py with alert exit codes, and a Paper trading monitor view with an approve-and-submit panel"
   ]
 }

@@ -31,7 +31,8 @@ import math
 
 
 # Import your core modules
-from core import panel, prices, pair_selection, pairs as pairs_mod, strategy, walkforward, execution, trade_proposals
+import datetime
+from core import panel, prices, pair_selection, pairs as pairs_mod, strategy, walkforward, execution, trade_proposals, paths, risk, broker_paper, daily_run, monitoring
 
 
 APP_META_PATH = Path("config/app_meta.json")
@@ -814,6 +815,135 @@ def run_walk_forward_ui() -> None:
         st.dataframe(result.fold_summary, use_container_width=True)
 
 
+def run_paper_monitor_ui() -> None:
+    """Monitoring + approval surface for the paper-trading system (read-mostly)."""
+    st.write("## Paper trading monitor")
+    st.caption(
+        "Simulated account only. Proposals come from the daily runner "
+        "(`python scripts/run_daily_proposals.py run`); nothing is ordered until you approve it here "
+        "or with the `approve` command."
+    )
+
+    db = paths.state_dir() / "rasa_paper.db"
+    if not db.exists():
+        st.info("No paper account yet. Run the daily runner once to create it.")
+        return
+
+    st.button("Refresh")  # any click reruns the script and re-reads everything
+
+    try:
+        risk_cfg = risk.load_risk_config()
+        pstatus = prices.get_cache_status_from_config()
+        last_bar = (
+            datetime.date.fromisoformat(pstatus["last_bar_date"]) if pstatus.get("last_bar_date") else None
+        )
+        broker = broker_paper.PaperBroker(db)
+    except Exception as e:
+        st.error(f"Could not open the paper account: {e}")
+        return
+
+    try:
+        runs = daily_run.list_run_records()
+        snap = monitoring.build_snapshot(broker, risk_cfg, runs, last_bar)
+
+        # ---- alerts ----
+        if not snap.alerts:
+            st.success("All clear: no alerts.")
+        for a in snap.alerts:
+            text = f"**{a.code}** — {a.message}"
+            {"critical": st.error, "warning": st.warning}.get(a.severity, st.info)(text)
+
+        # ---- headline numbers ----
+        c = st.columns(5)
+        c[0].metric("Equity", f"${snap.equity:,.0f}" if snap.equity is not None else "n/a",
+                    f"{snap.daily_pnl:+,.0f} today" if snap.daily_pnl is not None else None)
+        c[1].metric("Total PnL", f"{snap.total_pnl:+,.0f}" if snap.total_pnl is not None else "n/a")
+        c[2].metric("Drawdown", f"{snap.drawdown:.2%}", f"limit {risk_cfg.max_drawdown_pct:.0%}", delta_color="off")
+        c[3].metric("Gross exposure", f"${snap.gross:,.0f}" if snap.gross is not None else "n/a",
+                    f"{snap.gross_utilization:.0%} of limit" if snap.gross_utilization is not None else None,
+                    delta_color="off")
+        c[4].metric("Net exposure", f"${snap.net:,.0f}" if snap.net is not None else "n/a",
+                    f"{snap.net_utilization:.0%} of limit" if snap.net_utilization is not None else None,
+                    delta_color="off")
+        st.caption(
+            f"Environment **{snap.environment}** · prices through **{snap.price_last_bar}** "
+            f"({snap.price_age_bdays} bday old) · broker at **{snap.broker_last_bar}** · "
+            f"cash ${snap.cash:,.0f}"
+        )
+
+        if not snap.equity_history.empty:
+            hist = snap.equity_history.copy()
+            hist.index = pd.to_datetime(hist.index)
+            st.write("### Equity")
+            st.line_chart(hist[["equity"]])
+
+        st.write("### Positions")
+        if snap.positions.empty:
+            st.caption("Flat.")
+        else:
+            st.dataframe(snap.positions, use_container_width=True)
+
+        # ---- proposals awaiting approval ----
+        st.write("### Proposals awaiting approval")
+        if not snap.pending_proposals:
+            st.caption("None.")
+        else:
+            last_run = snap.last_run
+            st.caption(f"From run `{last_run.run_id}` (data through {last_run.as_of}). All passed the risk gates.")
+            rows = []
+            for t in snap.pending_proposals:
+                rows.append({
+                    "ticket": t.ticket_id, "pair": t.pair or t.purpose,
+                    "orders": ", ".join(f"{l.side.value} {l.quantity:g} {l.symbol}" for l in t.legs),
+                    "gross $": t.gross_notional,
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            chosen = st.multiselect("Tickets to approve", [t.ticket_id for t in snap.pending_proposals])
+            confirm = st.checkbox("I reviewed these orders and want them sent to the paper broker")
+            if st.button("Approve & submit", disabled=not (chosen and confirm), type="primary"):
+                try:
+                    done = daily_run.approve_and_submit(last_run, broker, chosen, approved_by="streamlit")
+                except daily_run.RunError as e:
+                    st.error(f"Refused: {e}")
+                else:
+                    st.success(f"Submitted {len(done)} ticket(s). They fill on the next daily run.")
+
+        # ---- working orders ----
+        st.write("### Working orders")
+        if not snap.working_tickets:
+            st.caption("None.")
+        else:
+            st.dataframe(pd.DataFrame([{
+                "ticket": t.ticket_id, "pair": t.pair or t.purpose, "status": t.status.value,
+                "orders": ", ".join(
+                    f"{l.side.value} {t.remaining_quantity(l.symbol):g}/{l.quantity:g} {l.symbol}" for l in t.legs),
+            } for t in snap.working_tickets]), use_container_width=True)
+
+        # ---- runs ----
+        st.write("### Recent daily runs")
+        if not runs:
+            st.caption("No runs recorded yet.")
+        else:
+            st.dataframe(pd.DataFrame([{
+                "run": r.run_id, "started": r.started_at[:19], "status": r.status, "data through": r.as_of,
+                "data age (bd)": r.data_age_business_days, "ideas": r.n_ideas, "tickets": len(r.tickets),
+                "submitted": len(r.submitted_ticket_ids),
+            } for r in reversed(runs[-15:])]), use_container_width=True)
+            with st.expander("Latest run: warnings and risk decisions"):
+                lr = runs[-1]
+                for w in lr.warnings:
+                    st.write(f"- {w}")
+                for d in lr.risk_report.get("decisions", []):
+                    fails = [f"{ch['name']}: {ch['detail']}" for ch in d["checks"] if not ch["passed"]]
+                    st.write(f"- `{d['ticket_id']}` {d['pair']}: "
+                             + ("**approved**" if d["approved"] else "**rejected** — " + "; ".join(fails)))
+
+        with st.expander("Audit log (last 50 events)"):
+            st.dataframe(broker.events().tail(50).iloc[::-1], use_container_width=True)
+    finally:
+        broker.close()
+
+
 # -----------------------------------------------------------------------------
 # Main Streamlit app
 # -----------------------------------------------------------------------------
@@ -865,6 +995,7 @@ def main() -> None:
             "Pair inspection",
             "Trade proposals",
             "Walk-forward validation",
+            "Paper trading monitor",
         ),
     )
 
@@ -926,6 +1057,10 @@ def main() -> None:
     # -------------------- Walk-forward validation --------------------
     elif view == "Walk-forward validation":
         run_walk_forward_ui()
+
+    # -------------------- Paper trading monitor --------------------
+    elif view == "Paper trading monitor":
+        run_paper_monitor_ui()
 
 if __name__ == "__main__":
     main()
