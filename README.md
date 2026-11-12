@@ -170,6 +170,22 @@ curve to the cent, and with costs it matches the `core/execution.py` model (both
 interest on cash, dividends on shorts, corporate actions. The Streamlit views still use the
 older scalar backtest.
 
+## Paper broker
+
+`core/broker_base.py` defines the `Broker` interface; `core/broker_paper.py` implements it as a
+simulated account kept in one SQLite file (default location `state/`, gitignored, **not**
+regenerable - it is the account history). Submit `APPROVED` tickets with `submit_ticket`
+(idempotent on `ticket_id`: resubmitting never creates a second order), then advance time with
+`process_bar(prices, as_of)`: working tickets fill against that bar (market at the bar price;
+limit only if marketable; optional partial fills), unfilled DAY legs expire, short borrow is
+charged once per new bar, and an equity point is recorded. Each operation is one transaction,
+so a crash or error leaves either all of it or none. Every submission, fill, expiry, borrow
+charge and reconciliation goes to an append-only `events` table. The account config is stored
+in the DB and reopening with a different one is refused. `reconcile(expected)` lists position
+breaks. No margin check (cash can go negative; the risk layer limits size), and an expired
+DAY leg can leave a pair one-legged - visible in the ticket history. Nothing in the UI uses the
+broker yet; the daily runner (Phase 4) will drive it.
+
 ## Tests
 
 ```bash

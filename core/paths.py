@@ -109,6 +109,16 @@ def logs_dir() -> Path:
     return _ensure_dir(PROJECT_ROOT / "logs")
 
 
+def state_dir() -> Path:
+    """
+    Directory for persistent runtime state (e.g. the paper broker's SQLite file).
+
+    Unlike cache/, this is NOT regenerable: it holds account history. Its
+    *.db files are gitignored.
+    """
+    return _ensure_dir(PROJECT_ROOT / "state")
+
+
 # ---------------------------------------------------------------------------
 # Convenience utilities
 # ---------------------------------------------------------------------------
