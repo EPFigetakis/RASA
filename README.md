@@ -103,6 +103,21 @@ shows gross-vs-net equity and a cost breakdown. Spread/slippage are assumptions,
 quotes (the price panel is adjusted closes only), and positions still open at a fold's end are
 not liquidated. The other views still use the flat per-unit `trade_cost_per_unit` model.
 
+## Cache freshness & provenance
+
+- **Price cache:** each `cache/prices/<key>.parquet` has a `<key>.json` sidecar with the
+  universe, settings, `last_bar_date`, `updated_at` and a content `panel_fingerprint`. The
+  sidebar shows the last bar and warns when it is more than 2 business days behind
+  (holidays aren't modelled, hence the tolerance). Caches with a fixed `end_date` are never stale.
+- **Update prices** (sidebar) appends only the missing bars. It re-downloads a short overlap
+  and compares it with the cache; if adjusted history was restated (dividend/split) it falls
+  back to a full re-download rather than splicing inconsistent prices. If the download fails,
+  the existing cache keeps being served. In code: `load_prices(..., update_if_stale=True)`.
+- **Saved pair selection:** `cache/pairs/pair_candidates.json` records the universe, price
+  fingerprint and selection settings. "Load saved pair selection" refuses a different
+  universe/settings, and warns if the prices changed since the scan. Selections saved before
+  this feature have no record and load with a warning.
+
 ## Tests
 
 ```bash

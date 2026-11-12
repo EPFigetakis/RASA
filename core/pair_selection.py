@@ -37,7 +37,9 @@ Typical notebook usage:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from itertools import combinations
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -57,11 +59,13 @@ try:
     import core.panel as panel
     import core.pairs as pairs_mod
     import core.paths as paths
+    import core.prices as prices
 except ModuleNotFoundError:
     # Fallback if run from inside core/ directory
     import panel  # type: ignore
     import pairs as pairs_mod  # type: ignore
     import paths  # type: ignore
+    import prices  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +171,109 @@ def get_pairs_cache_path(cfg: Optional[PairSelectionConfig] = None) -> Path:
     return paths.cache_dir() / cfg.cache_subdir / cfg.filename
 
 
-def load_candidate_pairs(cfg: Optional[PairSelectionConfig] = None) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# Saved-selection provenance
+# ---------------------------------------------------------------------------
+
+_SETTING_FIELDS = ("max_pvalue", "min_obs", "use_log_prices", "add_intercept", "max_pairs")
+
+
+def get_pairs_metadata_path(cfg: Optional[PairSelectionConfig] = None) -> Path:
+    """Sidecar JSON next to the candidate CSV (same name, .json)."""
+    return get_pairs_cache_path(cfg).with_suffix(".json")
+
+
+def _write_pairs_metadata(
+    px: pd.DataFrame, cfg: PairSelectionConfig, n_pairs: int
+) -> None:
+    """Record which prices and settings produced the saved candidate table."""
+    meta = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "n_pairs": int(n_pairs),
+        "universe": sorted(str(c).upper() for c in px.columns),
+        "first_date": px.index.min().date().isoformat() if len(px) else None,
+        "last_date": px.index.max().date().isoformat() if len(px) else None,
+        "n_rows": int(px.shape[0]),
+        "panel_fingerprint": prices.panel_fingerprint(px),
+        "settings": {k: getattr(cfg, k) for k in _SETTING_FIELDS},
+    }
+    path = get_pairs_metadata_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, indent=2))
+
+
+def read_pairs_metadata(cfg: Optional[PairSelectionConfig] = None) -> Optional[dict]:
+    path = get_pairs_metadata_path(cfg)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+@dataclass
+class PairsCacheCheck:
+    """
+    Result of comparing a saved candidate table with the current price panel.
+
+    status:
+      "ok"          - same universe, settings and price data.
+      "data_changed"- same universe/settings but the prices differ (e.g. new
+                      bars were appended since the scan): usable, but the
+                      statistics are out of date.
+      "mismatch"    - different universe or settings: must not be used as-is.
+      "no_metadata" - legacy CSV with no provenance; cannot be verified.
+    """
+    status: str
+    reasons: List[str]
+
+    @property
+    def usable(self) -> bool:
+        return self.status in ("ok", "data_changed", "no_metadata")
+
+
+class StaleCacheError(RuntimeError):
+    """Raised when a saved pair selection does not match the current prices/settings."""
+
+
+def check_candidate_pairs_cache(
+    px: pd.DataFrame, cfg: Optional[PairSelectionConfig] = None
+) -> PairsCacheCheck:
+    """Compare the saved selection's provenance with `px` and `cfg`."""
+    cfg = cfg or PairSelectionConfig()
+    meta = read_pairs_metadata(cfg)
+    if meta is None:
+        return PairsCacheCheck(
+            "no_metadata",
+            ["Saved selection has no provenance record; recompute to verify it."],
+        )
+
+    hard: List[str] = []
+    universe_now = sorted(str(c).upper() for c in px.columns)
+    if meta.get("universe") != universe_now:
+        saved, now = set(meta.get("universe") or []), set(universe_now)
+        hard.append(
+            f"Universe differs from the loaded prices "
+            f"({len(saved - now)} ticker(s) only in saved, {len(now - saved)} only in current)."
+        )
+    saved_settings = meta.get("settings", {})
+    for k in _SETTING_FIELDS:
+        if saved_settings.get(k) != getattr(cfg, k):
+            hard.append(f"Setting {k}: saved={saved_settings.get(k)!r}, current={getattr(cfg, k)!r}.")
+    if hard:
+        return PairsCacheCheck("mismatch", hard)
+
+    if meta.get("panel_fingerprint") != prices.panel_fingerprint(px):
+        last_now = px.index.max().date().isoformat() if len(px) else None
+        return PairsCacheCheck(
+            "data_changed",
+            [f"Prices changed since this selection was computed "
+             f"(saved through {meta.get('last_date')}, loaded through {last_now})."],
+        )
+    return PairsCacheCheck("ok", [])
+
+
+def load_candidate_pairs(
+    cfg: Optional[PairSelectionConfig] = None,
+    px: Optional[pd.DataFrame] = None,
+    strict: bool = True,
+) -> pd.DataFrame:
     """
     Load previously saved pair selection results from CSV.
 
@@ -175,6 +281,14 @@ def load_candidate_pairs(cfg: Optional[PairSelectionConfig] = None) -> pd.DataFr
     ----------
     cfg : PairSelectionConfig or None
         Determines the cache_subdir and filename. If None, defaults are used.
+
+    px : pd.DataFrame or None
+        If given, the saved selection's provenance is verified against this
+        price panel and `cfg` (see `check_candidate_pairs_cache`).
+    strict : bool
+        With `px`, raise StaleCacheError on a "mismatch" (different universe
+        or settings). Prices that merely changed ("data_changed") only log a
+        warning.
 
     Returns
     -------
@@ -185,6 +299,8 @@ def load_candidate_pairs(cfg: Optional[PairSelectionConfig] = None) -> pd.DataFr
     ------
     FileNotFoundError
         If the cache file does not exist.
+    StaleCacheError
+        If `px` is given, `strict` is True and the cache does not match.
     """
     cache_path = get_pairs_cache_path(cfg)
     if not cache_path.exists():
@@ -192,8 +308,13 @@ def load_candidate_pairs(cfg: Optional[PairSelectionConfig] = None) -> pd.DataFr
             f"No cached pair candidates found at: {cache_path}\n"
             "Run pair selection with save_to_csv=True at least once."
         )
-    df = pd.read_csv(cache_path)
-    return df
+    if px is not None:
+        check = check_candidate_pairs_cache(px, cfg)
+        if check.status == "mismatch" and strict:
+            raise StaleCacheError(" ".join(check.reasons))
+        if check.status != "ok":
+            log(f"[WARN] Saved pair selection ({check.status}): {' '.join(check.reasons)}")
+    return pd.read_csv(cache_path)
 
 
 def _estimate_half_life(spread: pd.Series) -> float:
@@ -338,6 +459,17 @@ def evaluate_pair(
 # Main scanning function
 # ---------------------------------------------------------------------------
 
+def _save_candidates(df: pd.DataFrame, px: pd.DataFrame, cfg: PairSelectionConfig) -> None:
+    """Write the CSV plus provenance sidecar if cfg.save_to_csv."""
+    if not cfg.save_to_csv:
+        return
+    out_path = get_pairs_cache_path(cfg)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    _write_pairs_metadata(px, cfg, len(df))
+    log(f"Saved {len(df)} candidate pairs to {out_path}")
+
+
 def find_candidate_pairs(
     px: pd.DataFrame,
     cfg: PairSelectionConfig,
@@ -391,9 +523,12 @@ def find_candidate_pairs(
 
     if not stats:
         log("No candidate pairs found with the given criteria.")
-        return pd.DataFrame(
+        empty = pd.DataFrame(
             columns=["x", "y", "pvalue", "hedge_ratio", "alpha", "half_life", "n_obs"]
         )
+        # Overwrite any previous save so an old table can't be mistaken for this run's.
+        _save_candidates(empty, px, cfg)
+        return empty
 
     # Convert to DataFrame
     df = pd.DataFrame(
@@ -418,14 +553,7 @@ def find_candidate_pairs(
     if cfg.max_pairs is not None and len(df) > cfg.max_pairs:
         df = df.iloc[: cfg.max_pairs].reset_index(drop=True)
 
-    # Save to CSV if requested
-    if cfg.save_to_csv:
-        out_dir = paths.cache_dir() / cfg.cache_subdir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / cfg.filename
-        df.to_csv(out_path, index=False)
-        log(f"Saved {len(df)} candidate pairs to {out_path}")
-
+    _save_candidates(df, px, cfg)
     return df
 
 

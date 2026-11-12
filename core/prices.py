@@ -31,10 +31,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -96,6 +97,20 @@ def _metadata_path(cache_path: Path) -> Path:
     return cache_path.with_suffix(".json")
 
 
+def panel_fingerprint(px: pd.DataFrame) -> str:
+    """
+    Content hash of a price panel (columns, dates and every value).
+
+    Used to tie derived artifacts (e.g. saved pair selections) to the exact
+    prices they were computed from: any change to a ticker, date or price
+    changes the fingerprint.
+    """
+    h = hashlib.sha256()
+    h.update(",".join(map(str, px.columns)).encode("utf-8"))
+    h.update(pd.util.hash_pandas_object(px, index=True).to_numpy().tobytes())
+    return h.hexdigest()[:16]
+
+
 def _write_cache_metadata(
     cache_path: Path,
     tickers: List[str],
@@ -103,17 +118,21 @@ def _write_cache_metadata(
     end: Optional[str],
     interval: str,
     px: pd.DataFrame,
+    created_at: Optional[str] = None,
 ) -> None:
     """Write a sidecar JSON file recording what's actually in the cache."""
+    now = datetime.now(timezone.utc).isoformat()
     meta = {
         "tickers": sorted(t.upper() for t in tickers),
         "start": start,
         "end": end,
         "interval": interval,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at or now,
+        "updated_at": now,
         "n_tickers_kept": int(px.shape[1]),
         "n_rows": int(px.shape[0]),
         "last_bar_date": px.index.max().date().isoformat() if len(px) else None,
+        "panel_fingerprint": panel_fingerprint(px),
     }
     _metadata_path(cache_path).write_text(json.dumps(meta, indent=2))
 
@@ -127,6 +146,175 @@ def read_cache_metadata(cache_path: Path) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Freshness
+# ---------------------------------------------------------------------------
+
+DEFAULT_STALE_AFTER_BUSINESS_DAYS = 2
+
+
+def latest_expected_bar(today: Optional[date] = None) -> date:
+    """
+    Most recent weekday whose daily bar should be complete: the weekday
+    strictly before `today`. Exchange holidays are not modelled, which is why
+    staleness is judged with a small tolerance rather than exactly.
+    """
+    today_ts = pd.Timestamp(today or datetime.now(timezone.utc).date()).normalize()
+    return (today_ts - pd.offsets.BDay(1)).date()
+
+
+def business_days_behind(last_bar: date, today: Optional[date] = None) -> int:
+    """Whole weekdays between the cache's last bar and the latest expected bar."""
+    expected = latest_expected_bar(today)
+    if last_bar >= expected:
+        return 0
+    return int(np.busday_count(last_bar, expected))
+
+
+def is_stale(
+    last_bar: date,
+    today: Optional[date] = None,
+    stale_after_business_days: int = DEFAULT_STALE_AFTER_BUSINESS_DAYS,
+) -> bool:
+    """True if the last bar is more than `stale_after_business_days` weekdays behind."""
+    return business_days_behind(last_bar, today) > stale_after_business_days
+
+
+def get_cache_status(
+    tickers: List[str],
+    start: str,
+    end: Optional[str],
+    data_dir: Optional[Path] = None,
+    cache_key: Optional[str] = None,
+    today: Optional[date] = None,
+    stale_after_business_days: int = DEFAULT_STALE_AFTER_BUSINESS_DAYS,
+) -> Dict[str, Any]:
+    """
+    Describe the price cache for a universe without loading or downloading it.
+
+    Returns a dict with: exists, cache_path, last_bar_date, updated_at,
+    business_days_behind, is_stale, fixed_end (True if `end` is set, in which
+    case new data can never arrive and staleness is not an issue).
+    """
+    data_dir = data_dir or (paths.cache_dir() / "prices")
+    tickers = [t.upper() for t in tickers]
+    cache_key = cache_key or build_cache_key(tickers, start, end, interval="1d")
+    cache_path = data_dir / f"{cache_key}.parquet"
+
+    status: Dict[str, Any] = {
+        "exists": cache_path.exists(),
+        "cache_path": cache_path,
+        "last_bar_date": None,
+        "updated_at": None,
+        "business_days_behind": None,
+        "is_stale": False,
+        "fixed_end": end is not None,
+    }
+    if not status["exists"]:
+        return status
+
+    meta = read_cache_metadata(cache_path) or {}
+    last_bar = meta.get("last_bar_date")
+    if last_bar is None:  # legacy cache without sidecar: read the index
+        idx = pd.read_parquet(cache_path).index
+        last_bar = pd.Timestamp(idx.max()).date().isoformat()
+    last_bar_d = date.fromisoformat(last_bar)
+    status["last_bar_date"] = last_bar
+    status["updated_at"] = meta.get("updated_at") or meta.get("created_at")
+    status["business_days_behind"] = business_days_behind(last_bar_d, today)
+    status["is_stale"] = (
+        end is None and is_stale(last_bar_d, today, stale_after_business_days)
+    )
+    return status
+
+
+# ---------------------------------------------------------------------------
+# Download + incremental update
+# ---------------------------------------------------------------------------
+
+def _download_close_panel(
+    tickers: List[str],
+    start: str,
+    end: Optional[str],
+) -> pd.DataFrame:
+    """Download adjusted closes from Yahoo and return a cleaned wide panel
+    (sorted, all-NaN rows dropped, gaps forward-filled; coverage NOT filtered)."""
+    # yfinance returns MultiIndex columns (field, ticker) for several tickers.
+    raw = yf.download(
+        tickers,
+        start=start,
+        end=end,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+    )
+    try:
+        px = raw["Close"]
+    except Exception:
+        log(f"Unexpected columns from yfinance: {raw.columns}")
+        raise
+
+    if isinstance(px, pd.Series):  # single ticker
+        px = px.to_frame()
+
+    px = px.sort_index().dropna(how="all").ffill()
+    if not isinstance(px.index, pd.DatetimeIndex):
+        px.index = pd.to_datetime(px.index)
+    return px
+
+
+# Adjusted closes are restated retroactively when a dividend or split happens,
+# so appending new bars to an old cache is only safe if the overlap still agrees.
+OVERLAP_DAYS = 7
+OVERLAP_REL_TOL = 1e-4
+
+
+def update_cached_prices(
+    cached: pd.DataFrame,
+    tickers: List[str],
+    start: str,
+    end: Optional[str],
+) -> Optional[pd.DataFrame]:
+    """
+    Extend a cached panel with bars newer than its last date.
+
+    Re-downloads a short overlap window and compares it with the cache. If any
+    overlapping price differs by more than OVERLAP_REL_TOL (a dividend/split
+    restated history), returns None so the caller does a full re-download
+    instead of splicing two inconsistent adjustment bases together.
+
+    Only the cached columns are extended (tickers dropped by the coverage
+    filter stay dropped).
+    """
+    if cached.empty:
+        return None
+    cols = list(cached.columns)
+    last_bar = cached.index.max()
+    fetch_from = (last_bar - pd.Timedelta(days=OVERLAP_DAYS)).date().isoformat()
+
+    fresh = _download_close_panel(cols, fetch_from, end)
+    fresh = fresh.reindex(columns=cols)
+    if fresh.empty:
+        return cached
+
+    overlap_idx = fresh.index.intersection(cached.index)
+    if len(overlap_idx) == 0:
+        return None
+    old = cached.loc[overlap_idx]
+    new = fresh.loc[overlap_idx]
+    both = old.notna() & new.notna()
+    rel = ((new - old).abs() / old.abs().where(old.abs() > 0)).where(both)
+    if np.nanmax(rel.to_numpy(dtype=float), initial=0.0) > OVERLAP_REL_TOL:
+        log("Overlap with cache disagrees (adjusted history was restated); full re-download needed.")
+        return None
+
+    added = fresh.loc[fresh.index > last_bar]
+    if added.empty:
+        return cached
+    out = pd.concat([cached, added]).sort_index().ffill()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Core price loader with parquet caching
 # ---------------------------------------------------------------------------
 
@@ -137,6 +325,8 @@ def load_prices(
     data_dir: Optional[Path] = None,
     cache_key: Optional[str] = None,
     force_refresh: bool = False,
+    update_if_stale: bool = False,
+    stale_after_business_days: int = DEFAULT_STALE_AFTER_BUSINESS_DAYS,
 ) -> pd.DataFrame:
     """
     Download/cached daily adjusted close prices for `tickers`.
@@ -167,6 +357,14 @@ def load_prices(
         collide on the same cache file.
     force_refresh : bool
         If True, ignore any existing cache and re-download.
+    update_if_stale : bool
+        If True and the cache's last bar is more than `stale_after_business_days`
+        weekdays behind (only when `end` is None), append the missing bars
+        incrementally (see `update_cached_prices`); falls back to a full
+        re-download if history was restated, and to the old cache (with a
+        warning) if the download fails.
+    stale_after_business_days : int
+        Tolerance before a cache counts as stale (absorbs holidays).
 
     Notes
     -----
@@ -189,59 +387,51 @@ def load_prices(
     cache_path = data_dir / f"{cache_key}.parquet"
 
     # Load from cache if available
+    need_full_download = True
     if cache_path.exists() and not force_refresh:
+        need_full_download = False
         log(f"Loading cached prices from {cache_path.name} …")
         meta = read_cache_metadata(cache_path)
-        if meta and meta.get("last_bar_date"):
-            log(f"Cache last bar: {meta['last_bar_date']} (use force_refresh=True to update)")
         px = pd.read_parquet(cache_path)
-        # Ensure datetime index
         if not isinstance(px.index, pd.DatetimeIndex):
             px.index = pd.to_datetime(px.index)
-        return px
+
+        if len(px):
+            last_bar = px.index.max().date()
+            behind = business_days_behind(last_bar)
+            stale = end is None and behind > stale_after_business_days
+            log(f"Cache last bar: {last_bar} ({behind} business day(s) behind)")
+            if stale and update_if_stale:
+                try:
+                    updated = update_cached_prices(px, tickers, start, end)
+                except Exception as e:  # network/vendor failure: keep serving old data
+                    log(f"[WARN] Incremental update failed ({e}); using existing cache.")
+                    return px
+                if updated is None:
+                    log("Falling back to a full re-download.")
+                    need_full_download = True
+                else:
+                    if len(updated) != len(px):
+                        log(f"Appended {len(updated) - len(px)} new bar(s).")
+                    updated.to_parquet(cache_path)
+                    _write_cache_metadata(
+                        cache_path, tickers, start, end, "1d", updated,
+                        created_at=(meta or {}).get("created_at"),
+                    )
+                    return updated
+            elif stale:
+                log("[WARN] Cache is stale; pass update_if_stale=True or force_refresh=True.")
+        if not need_full_download:
+            return px
 
     # Otherwise, download from Yahoo
     log(f"Downloading {len(tickers)} tickers from Yahoo Finance …")
-
-    # yfinance returns:
-    #   - MultiIndex columns when multiple tickers: (field, ticker)
-    #   - Single-index columns DataFrame when a single ticker
-    raw = yf.download(
-        tickers,
-        start=start,
-        end=end,
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-    )
-
-    # We only care about the 'Close' field (which is adjusted due to auto_adjust=True)
-    try:
-        px = raw["Close"]
-    except Exception:
-        # If something weird happens, show raw columns
-        log(f"Unexpected columns from yfinance: {raw.columns}")
-        raise
-
-    # If a single ticker is requested, px may be a Series
-    if isinstance(px, pd.Series):
-        px = px.to_frame()
-
-    # Sort by date index, drop all-NaN rows, forward-fill gaps
-    px = (
-        px.sort_index()
-          .dropna(how="all")
-          .ffill()
-    )
+    px = _download_close_panel(tickers, start, end)
 
     # Keep only columns with >98% non-NaN coverage
     coverage = px.notna().mean()
     keep_cols = coverage.loc[lambda s: s > 0.98].index
     px = px[keep_cols]
-
-    # Ensure DatetimeIndex
-    if not isinstance(px.index, pd.DatetimeIndex):
-        px.index = pd.to_datetime(px.index)
 
     # Save to parquet, plus sidecar metadata recording universe/settings/freshness
     px.to_parquet(cache_path)
@@ -278,6 +468,8 @@ def load_prices_from_config(
     data_dir: Optional[Path] = None,
     force_refresh: bool = False,
     cache_key: Optional[str] = None,
+    update_if_stale: bool = False,
+    stale_after_business_days: int = DEFAULT_STALE_AFTER_BUSINESS_DAYS,
 ) -> pd.DataFrame:
     """
     Convenience wrapper: read tickers/dates from a JSON config,
@@ -293,6 +485,8 @@ def load_prices_from_config(
         If True, force re-download even if cache exists.
     cache_key : str or None
         Optional explicit cache key. If None, auto key is used.
+    update_if_stale : bool
+        Append missing recent bars if the cache is stale (see `load_prices`).
 
     Returns
     -------
@@ -332,6 +526,26 @@ def load_prices_from_config(
         data_dir=data_dir,
         cache_key=cache_key,
         force_refresh=force_refresh,
+        update_if_stale=update_if_stale,
+        stale_after_business_days=stale_after_business_days,
+    )
+
+
+def get_cache_status_from_config(
+    config_path: Optional[Path] = None,
+    data_dir: Optional[Path] = None,
+    cache_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """`get_cache_status` for the universe in config/data_config.json."""
+    config_path = Path(config_path) if config_path else _default_config_path()
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    end = cfg.get("end_date")
+    return get_cache_status(
+        tickers=[str(t).upper() for t in cfg["tickers"]],
+        start=str(cfg.get("start_date", "2016-01-01")),
+        end=str(end) if end is not None else None,
+        data_dir=data_dir,
+        cache_key=cache_key,
     )
 
 

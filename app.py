@@ -31,7 +31,7 @@ import math
 
 
 # Import your core modules
-from core import panel, pair_selection, pairs as pairs_mod, strategy, walkforward, execution
+from core import panel, prices, pair_selection, pairs as pairs_mod, strategy, walkforward, execution
 
 
 APP_META_PATH = Path("config/app_meta.json")
@@ -250,10 +250,16 @@ def init_session_state() -> None:
             st.session_state[k] = v
 
 
-def load_universe_from_config() -> None:
-    """Load prices/returns via core.panel and cache in session_state."""
+def load_universe_from_config(update: bool = False) -> None:
+    """Load prices/returns via core.panel and cache in session_state.
+
+    update=True appends any bars newer than the cache (even a single day behind).
+    """
     try:
-        px, rets = panel.load_prices_and_returns_from_config()
+        px, rets = panel.load_prices_and_returns_from_config(
+            update_if_stale=update,
+            stale_after_business_days=0 if update else 2,
+        )
     except FileNotFoundError as e:
         st.error(
             "Could not find config/data_config.json.\n\n"
@@ -326,7 +332,12 @@ def run_pair_selection_ui() -> None:
     with load_col:
         if st.button("Load saved pair selection"):
             try:
-                pairs_df = pair_selection.load_candidate_pairs(cfg)
+                pairs_df = pair_selection.load_candidate_pairs(cfg, px=px, strict=True)
+            except pair_selection.StaleCacheError as e:
+                st.error(
+                    "Saved pair selection doesn't match the loaded prices/settings, so it "
+                    f"was not loaded: {e} Recompute it, or restore the matching settings."
+                )
             except FileNotFoundError:
                 st.warning(
                     "No saved pair selection found yet.\n"
@@ -336,7 +347,13 @@ def run_pair_selection_ui() -> None:
                 st.error(f"Failed to load pair selection: {e}")
             else:
                 st.session_state["pairs_df"] = pairs_df
-                st.success(f"Loaded {len(pairs_df)} candidate pairs from cache.")
+                check = pair_selection.check_candidate_pairs_cache(px, cfg)
+                if check.status == "ok":
+                    st.success(f"Loaded {len(pairs_df)} candidate pairs from cache (verified).")
+                else:
+                    st.warning(
+                        f"Loaded {len(pairs_df)} candidate pairs, but: " + " ".join(check.reasons)
+                    )
 
     # -------- Compute new selection --------
     with compute_col:
@@ -908,6 +925,23 @@ def main() -> None:
     st.sidebar.markdown("### 1. Data")
     if st.sidebar.button("Load data from config", type="primary"):
         load_universe_from_config()
+    if st.sidebar.button("Update prices (fetch new bars)"):
+        with st.spinner("Fetching new bars…"):
+            load_universe_from_config(update=True)
+
+    try:
+        cstatus = prices.get_cache_status_from_config()
+    except Exception:
+        cstatus = None
+    if cstatus and cstatus["exists"]:
+        behind = cstatus["business_days_behind"]
+        msg = f"Price cache last bar: **{cstatus['last_bar_date']}** ({behind} business day(s) behind)"
+        if cstatus["is_stale"]:
+            st.sidebar.warning(msg + " — stale; click *Update prices*.")
+        else:
+            st.sidebar.caption(msg)
+    elif cstatus:
+        st.sidebar.caption("No price cache yet — load data to download.")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 2. View")

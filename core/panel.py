@@ -133,6 +133,8 @@ def load_prices_and_returns_from_config(
     method: ReturnMethod = "log",
     force_refresh: bool = False,
     cache_key: Optional[str] = None,
+    update_if_stale: bool = False,
+    stale_after_business_days: int = prices.DEFAULT_STALE_AFTER_BUSINESS_DAYS,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Convenience function:
@@ -151,6 +153,8 @@ def load_prices_and_returns_from_config(
     cache_key : str or None
         Optional explicit cache key for the price parquet. If None, the
         automatic key from `load_prices` is used.
+    update_if_stale : bool
+        Append missing recent bars if the cached prices are stale.
 
     Returns
     -------
@@ -161,6 +165,8 @@ def load_prices_and_returns_from_config(
     px = prices.load_prices_from_config(
         force_refresh=force_refresh,
         cache_key=cache_key,
+        update_if_stale=update_if_stale,
+        stale_after_business_days=stale_after_business_days,
     )
     rets = compute_returns(px, method=method, drop_na=True)
     return px, rets
